@@ -2,12 +2,14 @@
 
 /**
  * Redis-like In-Memory Data Store
- * Phase 6: Sorted Set Data Structure
+ * Phase 14: Streams
  * 
  * Entry point: node server.js
  */
 
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Redis List implementation with efficient operations
@@ -2131,6 +2133,1428 @@ class RedisJSON {
     }
 }
 
+/**
+ * RedisGeo - Geospatial data structure
+ * Uses sorted sets with geohash scoring for efficient geographic queries
+ */
+class RedisGeo {
+    constructor() {
+        // Use RedisSortedSet to store geospatial data
+        // Score = geohash of coordinates, Member = location name
+        this.sortedSet = new RedisSortedSet();
+        
+        // Store actual coordinates separately for precision
+        this.coordinates = new Map(); // member -> {longitude, latitude}
+    }
+
+    /**
+     * Add geospatial items to the set
+     * @param {Array} items - Array of [longitude, latitude, member] triplets
+     * @returns {number} Number of elements added
+     */
+    geoadd(...items) {
+        if (items.length % 3 !== 0) {
+            throw new Error("ERR wrong number of arguments for GEOADD");
+        }
+
+        let added = 0;
+        for (let i = 0; i < items.length; i += 3) {
+            const longitude = parseFloat(items[i]);
+            const latitude = parseFloat(items[i + 1]);
+            const member = items[i + 2];
+
+            // Validate coordinates
+            if (isNaN(longitude) || isNaN(latitude)) {
+                throw new Error("ERR value is not a valid float");
+            }
+            
+            if (!this.isValidCoordinate(longitude, latitude)) {
+                throw new Error("ERR invalid longitude,latitude pair");
+            }
+
+            // Calculate geohash score
+            const geohash = this.encodeGeohash(longitude, latitude);
+            
+            // Check if member already exists
+            const existed = this.coordinates.has(member);
+            
+            // Store coordinates and add to sorted set
+            this.coordinates.set(member, { longitude, latitude });
+            this.sortedSet.zadd(geohash, member);
+            
+            if (!existed) {
+                added++;
+            }
+        }
+
+        return added;
+    }
+
+    /**
+     * Get distance between two members
+     * @param {string} member1 
+     * @param {string} member2 
+     * @param {string} unit - m, km, mi, ft
+     * @returns {number} Distance in specified unit
+     */
+    geodist(member1, member2, unit = 'm') {
+        const coord1 = this.coordinates.get(member1);
+        const coord2 = this.coordinates.get(member2);
+
+        if (!coord1 || !coord2) {
+            return null;
+        }
+
+        const distance = this.haversineDistance(
+            coord1.longitude, coord1.latitude,
+            coord2.longitude, coord2.latitude
+        );
+
+        return this.convertDistance(distance, unit);
+    }
+
+    /**
+     * Get positions (longitude, latitude) of members
+     * @param {...string} members 
+     * @returns {Array} Array of [longitude, latitude] pairs or null
+     */
+    geopos(...members) {
+        return members.map(member => {
+            const coord = this.coordinates.get(member);
+            return coord ? [coord.longitude.toString(), coord.latitude.toString()] : null;
+        });
+    }
+
+    /**
+     * Get geohash strings for members
+     * @param {...string} members 
+     * @returns {Array} Array of geohash strings
+     */
+    geohash(...members) {
+        return members.map(member => {
+            const coord = this.coordinates.get(member);
+            if (!coord) return null;
+            
+            return this.geohashString(coord.longitude, coord.latitude);
+        });
+    }
+
+    /**
+     * Search for members within radius from coordinates
+     * @param {number} longitude 
+     * @param {number} latitude 
+     * @param {number} radius 
+     * @param {string} unit 
+     * @param {Object} options 
+     * @returns {Array} Array of matching members with optional extra data
+     */
+    georadius(longitude, latitude, radius, unit, options = {}) {
+        if (!this.isValidCoordinate(longitude, latitude)) {
+            throw new Error("ERR invalid longitude,latitude pair");
+        }
+
+        const radiusInMeters = this.convertToMeters(radius, unit);
+        const results = [];
+
+        // Get all members and calculate distances
+        for (const [member, coord] of this.coordinates.entries()) {
+            const distance = this.haversineDistance(
+                longitude, latitude,
+                coord.longitude, coord.latitude
+            );
+
+            if (distance <= radiusInMeters) {
+                const result = { member, distance };
+                
+                if (options.WITHCOORD) {
+                    result.coordinates = [coord.longitude, coord.latitude];
+                }
+                if (options.WITHDIST) {
+                    result.distanceFormatted = this.convertDistance(distance, unit);
+                }
+                if (options.WITHHASH) {
+                    result.geohash = this.encodeGeohash(coord.longitude, coord.latitude);
+                }
+
+                results.push(result);
+            }
+        }
+
+        // Sort results
+        if (options.ASC) {
+            results.sort((a, b) => a.distance - b.distance);
+        } else if (options.DESC) {
+            results.sort((a, b) => b.distance - a.distance);
+        }
+
+        // Apply count limit
+        if (options.COUNT) {
+            results.splice(options.COUNT);
+        }
+
+        return results;
+    }
+
+    /**
+     * Search for members within radius from another member
+     * @param {string} member 
+     * @param {number} radius 
+     * @param {string} unit 
+     * @param {Object} options 
+     * @returns {Array} Array of matching members
+     */
+    georadiusbymember(member, radius, unit, options = {}) {
+        const coord = this.coordinates.get(member);
+        if (!coord) {
+            throw new Error("ERR could not decode requested zset member");
+        }
+
+        return this.georadius(coord.longitude, coord.latitude, radius, unit, options);
+    }
+
+    /**
+     * Modern geosearch command (Redis 6.2+)
+     * @param {string} fromMember - Search from this member
+     * @param {number} longitude - Or search from these coordinates
+     * @param {number} latitude 
+     * @param {Object} shape - {radius, unit} or {width, height, unit}
+     * @param {Object} options 
+     * @returns {Array} Search results
+     */
+    geosearch(fromMember, longitude, latitude, shape, options = {}) {
+        let searchLon, searchLat;
+
+        if (fromMember) {
+            const coord = this.coordinates.get(fromMember);
+            if (!coord) {
+                throw new Error("ERR could not decode requested zset member");
+            }
+            searchLon = coord.longitude;
+            searchLat = coord.latitude;
+        } else {
+            searchLon = longitude;
+            searchLat = latitude;
+        }
+
+        if (shape.radius) {
+            // Radius search
+            return this.georadius(searchLon, searchLat, shape.radius, shape.unit, options);
+        } else {
+            // Box search (simplified - treat as radius for now)
+            const radius = Math.max(shape.width, shape.height) / 2;
+            return this.georadius(searchLon, searchLat, radius, shape.unit, options);
+        }
+    }
+
+    /**
+     * Get all members (for general operations)
+     */
+    getMembers() {
+        return Array.from(this.coordinates.keys());
+    }
+
+    /**
+     * Remove members
+     */
+    zrem(...members) {
+        let removed = 0;
+        for (const member of members) {
+            if (this.coordinates.has(member)) {
+                this.coordinates.delete(member);
+                this.sortedSet.zrem(member);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * Get member count
+     */
+    zcard() {
+        return this.coordinates.size;
+    }
+
+    /**
+     * Check if empty
+     */
+    isEmpty() {
+        return this.coordinates.size === 0;
+    }
+
+    // ========== Geospatial Mathematics ==========
+
+    /**
+     * Validate geographic coordinates
+     */
+    isValidCoordinate(longitude, latitude) {
+        return longitude >= -180 && longitude <= 180 && 
+               latitude >= -85.05112878 && latitude <= 85.05112878;
+    }
+
+    /**
+     * Calculate Haversine distance between two points
+     * @param {number} lon1 
+     * @param {number} lat1 
+     * @param {number} lon2 
+     * @param {number} lat2 
+     * @returns {number} Distance in meters
+     */
+    haversineDistance(lon1, lat1, lon2, lat2) {
+        const R = 6371000; // Earth's radius in meters
+        const φ1 = lat1 * Math.PI / 180;
+        const φ2 = lat2 * Math.PI / 180;
+        const Δφ = (lat2 - lat1) * Math.PI / 180;
+        const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+        const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                  Math.cos(φ1) * Math.cos(φ2) *
+                  Math.sin(Δλ/2) * Math.sin(Δλ/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        return R * c;
+    }
+
+    /**
+     * Convert distance to different units
+     */
+    convertDistance(meters, unit) {
+        switch (unit) {
+            case 'm': return parseFloat(meters.toFixed(4));
+            case 'km': return parseFloat((meters / 1000).toFixed(4));
+            case 'mi': return parseFloat((meters / 1609.344).toFixed(4));
+            case 'ft': return parseFloat((meters * 3.28084).toFixed(4));
+            default: throw new Error("ERR unsupported unit provided. please use m, km, ft, mi");
+        }
+    }
+
+    /**
+     * Convert distance to meters
+     */
+    convertToMeters(distance, unit) {
+        switch (unit) {
+            case 'm': return distance;
+            case 'km': return distance * 1000;
+            case 'mi': return distance * 1609.344;
+            case 'ft': return distance / 3.28084;
+            default: throw new Error("ERR unsupported unit provided. please use m, km, ft, mi");
+        }
+    }
+
+    /**
+     * Encode coordinates to geohash (simplified implementation)
+     * Returns a numeric score for sorted set storage
+     */
+    encodeGeohash(longitude, latitude) {
+        // Normalize to 0-1 range
+        const lonNorm = (longitude + 180) / 360;
+        const latNorm = (latitude + 90) / 180;
+        
+        // Simple interleaving for demonstration (Redis uses more sophisticated encoding)
+        let hash = 0;
+        let lonBits = Math.floor(lonNorm * 0x1FFFFF); // 21 bits
+        let latBits = Math.floor(latNorm * 0x1FFFFF); // 21 bits
+        
+        // Interleave bits (simplified)
+        for (let i = 0; i < 21; i++) {
+            hash |= ((lonBits >> i) & 1) << (i * 2);
+            hash |= ((latBits >> i) & 1) << (i * 2 + 1);
+        }
+        
+        return hash;
+    }
+
+    /**
+     * Get geohash string representation (base32)
+     */
+    geohashString(longitude, latitude, precision = 11) {
+        const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+        
+        let lonMin = -180, lonMax = 180;
+        let latMin = -90, latMax = 90;
+        let evenBit = true;
+        let geohash = '';
+        let bit = 0;
+        let ch = 0;
+
+        while (geohash.length < precision) {
+            let mid;
+            
+            if (evenBit) {
+                // longitude
+                mid = (lonMin + lonMax) / 2;
+                if (longitude >= mid) {
+                    ch |= (1 << (4 - bit));
+                    lonMin = mid;
+                } else {
+                    lonMax = mid;
+                }
+            } else {
+                // latitude
+                mid = (latMin + latMax) / 2;
+                if (latitude >= mid) {
+                    ch |= (1 << (4 - bit));
+                    latMin = mid;
+                } else {
+                    latMax = mid;
+                }
+            }
+
+            evenBit = !evenBit;
+
+            if (bit < 4) {
+                bit++;
+            } else {
+                geohash += base32[ch];
+                bit = 0;
+                ch = 0;
+            }
+        }
+
+        return geohash;
+    }
+
+    /**
+     * Serialize for RDB storage
+     */
+    toArray() {
+        const result = [];
+        for (const [member, coord] of this.coordinates.entries()) {
+            result.push({
+                member,
+                longitude: coord.longitude,
+                latitude: coord.latitude
+            });
+        }
+        return result;
+    }
+}
+
+/**
+ * RedisBitmap - Bitmap/Bitfield data structure
+ * Supports efficient bit operations and bitfield manipulations
+ */
+class RedisBitmap {
+    constructor() {
+        // Use Buffer for efficient bit storage
+        this.buffer = Buffer.alloc(0);
+        this.maxBitPosition = -1;
+    }
+
+    /**
+     * Ensure buffer is large enough to hold the specified bit position
+     * @param {number} bitPosition - Bit position to accommodate
+     */
+    ensureCapacity(bitPosition) {
+        const requiredBytes = Math.ceil((bitPosition + 1) / 8);
+        if (this.buffer.length < requiredBytes) {
+            const newBuffer = Buffer.alloc(requiredBytes);
+            this.buffer.copy(newBuffer);
+            this.buffer = newBuffer;
+        }
+        this.maxBitPosition = Math.max(this.maxBitPosition, bitPosition);
+    }
+
+    /**
+     * Set bit at specified position
+     * @param {number} bitPosition - Bit position (0-based)
+     * @param {number} value - Bit value (0 or 1)
+     * @returns {number} Previous bit value
+     */
+    setbit(bitPosition, value) {
+        if (bitPosition < 0) {
+            throw new Error("ERR bit offset is not an integer or out of range");
+        }
+
+        value = value ? 1 : 0;
+        this.ensureCapacity(bitPosition);
+
+        const byteIndex = Math.floor(bitPosition / 8);
+        const bitIndex = bitPosition % 8;
+        const mask = 1 << (7 - bitIndex); // Big-endian bit ordering
+
+        const previousValue = (this.buffer[byteIndex] & mask) ? 1 : 0;
+
+        if (value) {
+            this.buffer[byteIndex] |= mask;
+        } else {
+            this.buffer[byteIndex] &= ~mask;
+        }
+
+        return previousValue;
+    }
+
+    /**
+     * Get bit at specified position
+     * @param {number} bitPosition - Bit position (0-based)
+     * @returns {number} Bit value (0 or 1)
+     */
+    getbit(bitPosition) {
+        if (bitPosition < 0) {
+            throw new Error("ERR bit offset is not an integer or out of range");
+        }
+
+        if (bitPosition > this.maxBitPosition) {
+            return 0;
+        }
+
+        const byteIndex = Math.floor(bitPosition / 8);
+        const bitIndex = bitPosition % 8;
+        const mask = 1 << (7 - bitIndex); // Big-endian bit ordering
+
+        return (this.buffer[byteIndex] & mask) ? 1 : 0;
+    }
+
+    /**
+     * Count number of set bits in range
+     * @param {number} start - Start byte (inclusive, -1 for beginning)
+     * @param {number} end - End byte (inclusive, -1 for end)
+     * @returns {number} Number of set bits
+     */
+    bitcount(start = 0, end = -1) {
+        if (this.buffer.length === 0) {
+            return 0;
+        }
+
+        // Handle negative indices
+        const bufferLength = this.buffer.length;
+        if (start < 0) start = bufferLength + start;
+        if (end < 0) end = bufferLength + end;
+
+        // Clamp to valid range
+        start = Math.max(0, Math.min(start, bufferLength - 1));
+        end = Math.max(0, Math.min(end, bufferLength - 1));
+
+        if (start > end) {
+            return 0;
+        }
+
+        let count = 0;
+        for (let i = start; i <= end; i++) {
+            count += this.popcount(this.buffer[i]);
+        }
+
+        return count;
+    }
+
+    /**
+     * Find first bit set to specified value
+     * @param {number} bit - Bit value to find (0 or 1)
+     * @param {number} start - Start bit position
+     * @param {number} end - End bit position (-1 for end)
+     * @returns {number} Bit position or -1 if not found
+     */
+    bitpos(bit, start = 0, end = -1) {
+        bit = bit ? 1 : 0;
+        
+        if (this.buffer.length === 0) {
+            return bit === 0 ? 0 : -1;
+        }
+
+        const totalBits = this.buffer.length * 8;
+        
+        // Handle byte-based start/end if provided
+        if (end === -1) {
+            end = totalBits - 1;
+        }
+
+        start = Math.max(0, start);
+        end = Math.min(end, totalBits - 1);
+
+        for (let bitPos = start; bitPos <= end; bitPos++) {
+            if (this.getbit(bitPos) === bit) {
+                return bitPos;
+            }
+        }
+
+        return -1;
+    }
+
+    /**
+     * Perform bitwise operation with another bitmap
+     * @param {string} operation - AND, OR, XOR, NOT
+     * @param {RedisBitmap} other - Other bitmap (null for NOT)
+     * @returns {RedisBitmap} Result bitmap
+     */
+    bitop(operation, other = null) {
+        const result = new RedisBitmap();
+
+        switch (operation.toUpperCase()) {
+            case 'NOT':
+                result.buffer = Buffer.alloc(this.buffer.length);
+                for (let i = 0; i < this.buffer.length; i++) {
+                    result.buffer[i] = ~this.buffer[i] & 0xFF;
+                }
+                result.maxBitPosition = this.maxBitPosition;
+                break;
+
+            case 'AND':
+            case 'OR':
+            case 'XOR':
+                if (!other) {
+                    throw new Error("ERR operation requires two operands");
+                }
+                
+                const maxLength = Math.max(this.buffer.length, other.buffer.length);
+                result.buffer = Buffer.alloc(maxLength);
+                
+                for (let i = 0; i < maxLength; i++) {
+                    const byte1 = i < this.buffer.length ? this.buffer[i] : 0;
+                    const byte2 = i < other.buffer.length ? other.buffer[i] : 0;
+                    
+                    switch (operation.toUpperCase()) {
+                        case 'AND':
+                            result.buffer[i] = byte1 & byte2;
+                            break;
+                        case 'OR':
+                            result.buffer[i] = byte1 | byte2;
+                            break;
+                        case 'XOR':
+                            result.buffer[i] = byte1 ^ byte2;
+                            break;
+                    }
+                }
+                
+                result.maxBitPosition = Math.max(this.maxBitPosition, other.maxBitPosition);
+                break;
+
+            default:
+                throw new Error("ERR operation must be AND, OR, XOR, or NOT");
+        }
+
+        return result;
+    }
+
+    /**
+     * Get/Set/Increment bitfield values
+     * @param {Array} operations - Array of bitfield operations
+     * @returns {Array} Results of operations
+     */
+    bitfield(operations) {
+        const results = [];
+        let overflowBehavior = 'WRAP'; // Default overflow behavior
+
+        for (const op of operations) {
+            const { command, type, offset, value, behavior } = op;
+
+            if (behavior) {
+                overflowBehavior = behavior;
+                continue; // OVERFLOW command doesn't return a value
+            }
+
+            const { signed, bits } = this.parseType(type);
+            const bitOffset = this.parseOffset(offset, bits);
+
+            switch (command.toUpperCase()) {
+                case 'GET':
+                    results.push(this.getBitfield(bitOffset, bits, signed));
+                    break;
+                case 'SET':
+                    const oldValue = this.getBitfield(bitOffset, bits, signed);
+                    this.setBitfield(bitOffset, bits, value, signed, overflowBehavior);
+                    results.push(oldValue);
+                    break;
+                case 'INCRBY':
+                    const currentValue = this.getBitfield(bitOffset, bits, signed);
+                    const newValue = this.incrementBitfield(currentValue, value, bits, signed, overflowBehavior);
+                    if (newValue !== null) {
+                        this.setBitfield(bitOffset, bits, newValue, signed, overflowBehavior);
+                        results.push(newValue);
+                    } else {
+                        results.push(null); // Overflow with FAIL behavior
+                    }
+                    break;
+            }
+        }
+
+        return results;
+    }
+
+    /**
+     * Parse bitfield type (e.g., "u8", "i16")
+     * @param {string} type - Type string
+     * @returns {Object} Parsed type info
+     */
+    parseType(type) {
+        const match = type.match(/^([ui])(\d+)$/);
+        if (!match) {
+            throw new Error("ERR Invalid bitfield type");
+        }
+
+        const signed = match[1] === 'i';
+        const bits = parseInt(match[2]);
+
+        if (bits < 1 || bits > 64) {
+            throw new Error("ERR Invalid bitfield type");
+        }
+
+        return { signed, bits };
+    }
+
+    /**
+     * Parse bitfield offset
+     * @param {string|number} offset - Offset (can include multiplier like "#1")
+     * @param {number} bits - Number of bits for type-based offsets
+     * @returns {number} Bit offset
+     */
+    parseOffset(offset, bits) {
+        if (typeof offset === 'number') {
+            return offset;
+        }
+
+        if (typeof offset === 'string' && offset.startsWith('#')) {
+            const multiplier = parseInt(offset.substring(1));
+            return multiplier * bits;
+        }
+
+        return parseInt(offset);
+    }
+
+    /**
+     * Get bitfield value
+     * @param {number} bitOffset - Bit offset
+     * @param {number} bits - Number of bits
+     * @param {boolean} signed - Whether value is signed
+     * @returns {number} Value
+     */
+    getBitfield(bitOffset, bits, signed) {
+        let value = 0;
+        
+        for (let i = 0; i < bits; i++) {
+            const bit = this.getbit(bitOffset + i);
+            value = (value << 1) | bit;
+        }
+
+        // Handle signed values
+        if (signed && bits < 64) {
+            const signBit = 1 << (bits - 1);
+            if (value & signBit) {
+                value -= (1 << bits);
+            }
+        }
+
+        return value;
+    }
+
+    /**
+     * Set bitfield value
+     * @param {number} bitOffset - Bit offset
+     * @param {number} bits - Number of bits
+     * @param {number} value - Value to set
+     * @param {boolean} signed - Whether value is signed
+     * @param {string} overflowBehavior - WRAP, SAT, or FAIL
+     */
+    setBitfield(bitOffset, bits, value, signed, overflowBehavior) {
+        // Apply overflow behavior
+        value = this.applyOverflow(value, bits, signed, overflowBehavior);
+
+        // Ensure value fits in specified bits
+        const mask = (1 << bits) - 1;
+        value = value & mask;
+
+        // Set bits from most significant to least significant
+        for (let i = 0; i < bits; i++) {
+            const bit = (value >> (bits - 1 - i)) & 1;
+            this.setbit(bitOffset + i, bit);
+        }
+    }
+
+    /**
+     * Increment bitfield value
+     * @param {number} currentValue - Current value
+     * @param {number} increment - Increment amount
+     * @param {number} bits - Number of bits
+     * @param {boolean} signed - Whether value is signed
+     * @param {string} overflowBehavior - WRAP, SAT, or FAIL
+     * @returns {number|null} New value or null if overflow with FAIL
+     */
+    incrementBitfield(currentValue, increment, bits, signed, overflowBehavior) {
+        const newValue = currentValue + increment;
+        
+        // Check for overflow
+        const maxValue = signed ? (1 << (bits - 1)) - 1 : (1 << bits) - 1;
+        const minValue = signed ? -(1 << (bits - 1)) : 0;
+
+        if (newValue > maxValue || newValue < minValue) {
+            if (overflowBehavior === 'FAIL') {
+                return null;
+            }
+        }
+
+        return this.applyOverflow(newValue, bits, signed, overflowBehavior);
+    }
+
+    /**
+     * Apply overflow behavior to value
+     * @param {number} value - Value to process
+     * @param {number} bits - Number of bits
+     * @param {boolean} signed - Whether value is signed
+     * @param {string} overflowBehavior - WRAP, SAT, or FAIL
+     * @returns {number} Processed value
+     */
+    applyOverflow(value, bits, signed, overflowBehavior) {
+        const maxValue = signed ? (1 << (bits - 1)) - 1 : (1 << bits) - 1;
+        const minValue = signed ? -(1 << (bits - 1)) : 0;
+
+        if (value >= minValue && value <= maxValue) {
+            return value;
+        }
+
+        switch (overflowBehavior.toUpperCase()) {
+            case 'WRAP':
+                if (signed) {
+                    const range = 1 << bits;
+                    value = ((value - minValue) % range + range) % range + minValue;
+                } else {
+                    value = value & ((1 << bits) - 1);
+                }
+                break;
+            case 'SAT':
+                value = Math.max(minValue, Math.min(maxValue, value));
+                break;
+            case 'FAIL':
+                // Return original value, caller should handle failure
+                break;
+        }
+
+        return value;
+    }
+
+    /**
+     * Population count (number of set bits in a byte)
+     * @param {number} byte - Byte value
+     * @returns {number} Number of set bits
+     */
+    popcount(byte) {
+        let count = 0;
+        while (byte) {
+            count += byte & 1;
+            byte >>>= 1;
+        }
+        return count;
+    }
+
+    /**
+     * Get bitmap size in bytes
+     * @returns {number} Size in bytes
+     */
+    size() {
+        return this.buffer.length;
+    }
+
+    /**
+     * Check if bitmap is empty
+     * @returns {boolean} True if empty
+     */
+    isEmpty() {
+        return this.buffer.length === 0;
+    }
+
+    /**
+     * Serialize for RDB storage
+     * @returns {Object} Serialized data
+     */
+    toArray() {
+        return {
+            buffer: this.buffer.toString('base64'),
+            maxBitPosition: this.maxBitPosition
+        };
+    }
+
+    /**
+     * Deserialize from RDB storage
+     * @param {Object} data - Serialized data
+     */
+    fromArray(data) {
+        this.buffer = Buffer.from(data.buffer, 'base64');
+        this.maxBitPosition = data.maxBitPosition || -1;
+    }
+}
+
+/**
+ * RedisStream - Stream data structure for time-ordered data records
+ * Supports consumer groups, pending entries, and distributed processing
+ */
+class RedisStream {
+    constructor() {
+        // Stream entries stored as Map: id -> {fields: {key: value, ...}, addTime: timestamp}
+        this.entries = new Map();
+        
+        // Consumer groups: groupName -> {id, consumers: Map, pel: Map, lastDeliveredId}
+        this.consumerGroups = new Map();
+        
+        // Stream metadata
+        this.lastGeneratedId = '0-0';
+        this.maxLength = null; // For XTRIM
+        this.radixTreeApprox = false; // For XTRIM with ~
+        
+        // Global entry counter for sequence numbers
+        this.entryCounter = 0;
+    }
+
+    /**
+     * Generate unique stream entry ID
+     * @param {string} id - Explicit ID or '*' for auto-generation
+     * @returns {string} Generated or validated ID
+     */
+    generateId(id = '*') {
+        if (id === '*') {
+            const now = Date.now();
+            const lastTimestamp = this.parseId(this.lastGeneratedId).timestamp;
+            
+            if (now > lastTimestamp) {
+                this.lastGeneratedId = `${now}-0`;
+            } else if (now === lastTimestamp) {
+                const lastSequence = this.parseId(this.lastGeneratedId).sequence;
+                this.lastGeneratedId = `${now}-${lastSequence + 1}`;
+            } else {
+                // Clock went backwards, use last timestamp + 1 sequence
+                this.lastGeneratedId = `${lastTimestamp}-${this.parseId(this.lastGeneratedId).sequence + 1}`;
+            }
+            return this.lastGeneratedId;
+        } else {
+            // Validate explicit ID format
+            if (!this.isValidId(id)) {
+                throw new Error("ERR Invalid stream ID specified as stream command argument");
+            }
+            
+            // Check if ID is greater than last generated ID
+            if (this.compareIds(id, this.lastGeneratedId) <= 0 && this.lastGeneratedId !== '0-0') {
+                throw new Error("ERR The ID specified in XADD is equal or smaller than the target stream top item");
+            }
+            
+            this.lastGeneratedId = id;
+            return id;
+        }
+    }
+
+    /**
+     * Parse stream ID into timestamp and sequence components
+     * @param {string} id - Stream ID (e.g., "1609459200000-0")
+     * @returns {Object} Parsed ID with timestamp and sequence
+     */
+    parseId(id) {
+        const parts = id.split('-');
+        if (parts.length !== 2) {
+            throw new Error("ERR Invalid stream ID specified");
+        }
+        
+        const timestamp = parseInt(parts[0]);
+        const sequence = parseInt(parts[1]);
+        
+        if (isNaN(timestamp) || isNaN(sequence) || timestamp < 0 || sequence < 0) {
+            throw new Error("ERR Invalid stream ID specified");
+        }
+        
+        return { timestamp, sequence };
+    }
+
+    /**
+     * Validate stream ID format
+     * @param {string} id - Stream ID to validate
+     * @returns {boolean} True if valid
+     */
+    isValidId(id) {
+        try {
+            this.parseId(id);
+            return true;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Compare two stream IDs
+     * @param {string} id1 - First ID
+     * @param {string} id2 - Second ID  
+     * @returns {number} -1 if id1 < id2, 0 if equal, 1 if id1 > id2
+     */
+    compareIds(id1, id2) {
+        const parsed1 = this.parseId(id1);
+        const parsed2 = this.parseId(id2);
+        
+        if (parsed1.timestamp !== parsed2.timestamp) {
+            return parsed1.timestamp < parsed2.timestamp ? -1 : 1;
+        }
+        
+        if (parsed1.sequence !== parsed2.sequence) {
+            return parsed1.sequence < parsed2.sequence ? -1 : 1;
+        }
+        
+        return 0;
+    }
+
+    /**
+     * Add entry to stream
+     * @param {string} id - Entry ID or '*' for auto-generation
+     * @param {Array} fieldValues - Array of [field, value, field, value, ...]
+     * @returns {string} Generated entry ID
+     */
+    xadd(id, fieldValues) {
+        if (fieldValues.length % 2 !== 0) {
+            throw new Error("ERR wrong number of arguments for XADD");
+        }
+        
+        const entryId = this.generateId(id);
+        
+        // Convert field-value pairs to object
+        const fields = {};
+        for (let i = 0; i < fieldValues.length; i += 2) {
+            fields[fieldValues[i]] = fieldValues[i + 1];
+        }
+        
+        // Add entry
+        this.entries.set(entryId, {
+            fields: fields,
+            addTime: Date.now()
+        });
+        
+        // Trim stream if max length is set
+        if (this.maxLength !== null) {
+            this.trimToLength(this.maxLength, this.radixTreeApprox);
+        }
+        
+        return entryId;
+    }
+
+    /**
+     * Get stream length
+     * @returns {number} Number of entries in stream
+     */
+    xlen() {
+        return this.entries.size;
+    }
+
+    /**
+     * Get range of entries
+     * @param {string} start - Start ID (inclusive) or '-' for first
+     * @param {string} end - End ID (inclusive) or '+' for last
+     * @param {number} count - Maximum number of entries to return
+     * @returns {Array} Array of [id, [field, value, field, value, ...]]
+     */
+    xrange(start, end, count = -1) {
+        const entries = [];
+        const startId = start === '-' ? this.getFirstId() : start;
+        const endId = end === '+' ? this.getLastId() : end;
+        
+        if (!startId || !endId) {
+            return entries; // Empty stream
+        }
+        
+        for (const [id, entry] of this.entries) {
+            if (this.compareIds(id, startId) >= 0 && this.compareIds(id, endId) <= 0) {
+                const fieldArray = [];
+                for (const [field, value] of Object.entries(entry.fields)) {
+                    fieldArray.push(field, value);
+                }
+                entries.push([id, fieldArray]);
+                
+                if (count > 0 && entries.length >= count) {
+                    break;
+                }
+            }
+        }
+        
+        return entries;
+    }
+
+    /**
+     * Get reverse range of entries
+     * @param {string} start - Start ID (inclusive) or '+' for last
+     * @param {string} end - End ID (inclusive) or '-' for first
+     * @param {number} count - Maximum number of entries to return
+     * @returns {Array} Array of [id, [field, value, field, value, ...]]
+     */
+    xrevrange(start, end, count = -1) {
+        const entries = [];
+        const startId = start === '+' ? this.getLastId() : start;
+        const endId = end === '-' ? this.getFirstId() : end;
+        
+        if (!startId || !endId) {
+            return entries; // Empty stream
+        }
+        
+        // Get all entries in reverse order
+        const allEntries = Array.from(this.entries.entries()).reverse();
+        
+        for (const [id, entry] of allEntries) {
+            if (this.compareIds(id, startId) <= 0 && this.compareIds(id, endId) >= 0) {
+                const fieldArray = [];
+                for (const [field, value] of Object.entries(entry.fields)) {
+                    fieldArray.push(field, value);
+                }
+                entries.push([id, fieldArray]);
+                
+                if (count > 0 && entries.length >= count) {
+                    break;
+                }
+            }
+        }
+        
+        return entries;
+    }
+
+    /**
+     * Delete entries from stream
+     * @param {Array} ids - Array of entry IDs to delete
+     * @returns {number} Number of entries deleted
+     */
+    xdel(ids) {
+        let deletedCount = 0;
+        
+        for (const id of ids) {
+            if (this.entries.has(id)) {
+                this.entries.delete(id);
+                deletedCount++;
+                
+                // Remove from all consumer group PELs
+                for (const group of this.consumerGroups.values()) {
+                    if (group.pel.has(id)) {
+                        group.pel.delete(id);
+                    }
+                }
+            }
+        }
+        
+        return deletedCount;
+    }
+
+    /**
+     * Trim stream to specified length
+     * @param {number} maxLen - Maximum length to keep
+     * @param {boolean} approximate - Use approximate trimming (~)
+     * @returns {number} Number of entries removed
+     */
+    xtrim(maxLen, approximate = false) {
+        this.maxLength = maxLen;
+        this.radixTreeApprox = approximate;
+        return this.trimToLength(maxLen, approximate);
+    }
+
+    /**
+     * Internal method to trim stream to length
+     * @param {number} maxLen - Maximum length
+     * @param {boolean} approximate - Use approximate trimming
+     * @returns {number} Number of entries removed
+     */
+    trimToLength(maxLen, approximate = false) {
+        const currentLen = this.entries.size;
+        if (currentLen <= maxLen) {
+            return 0;
+        }
+        
+        const toRemove = currentLen - maxLen;
+        const entriesToRemove = Array.from(this.entries.keys()).slice(0, toRemove);
+        
+        for (const id of entriesToRemove) {
+            this.entries.delete(id);
+            
+            // Remove from all consumer group PELs
+            for (const group of this.consumerGroups.values()) {
+                if (group.pel.has(id)) {
+                    group.pel.delete(id);
+                }
+            }
+        }
+        
+        return toRemove;
+    }
+
+    /**
+     * Get first entry ID in stream
+     * @returns {string|null} First entry ID or null if empty
+     */
+    getFirstId() {
+        const keys = Array.from(this.entries.keys());
+        return keys.length > 0 ? keys[0] : null;
+    }
+
+    /**
+     * Get last entry ID in stream
+     * @returns {string|null} Last entry ID or null if empty
+     */
+    getLastId() {
+        const keys = Array.from(this.entries.keys());
+        return keys.length > 0 ? keys[keys.length - 1] : null;
+    }
+
+    /**
+     * Create consumer group
+     * @param {string} groupName - Name of the consumer group
+     * @param {string} id - Starting ID for the group or '$' for latest
+     * @returns {boolean} True if group created, false if already exists
+     */
+    xgroupCreate(groupName, id) {
+        if (this.consumerGroups.has(groupName)) {
+            return false; // Group already exists
+        }
+        
+        let lastDeliveredId = id;
+        if (id === '$') {
+            lastDeliveredId = this.getLastId() || '0-0';
+        }
+        
+        this.consumerGroups.set(groupName, {
+            id: lastDeliveredId,
+            consumers: new Map(), // consumerName -> {name, pending: Map, lastSeen: timestamp}
+            pel: new Map(), // entryId -> {consumer, deliveryTime, deliveryCount}
+            lastDeliveredId: lastDeliveredId
+        });
+        
+        return true;
+    }
+
+    /**
+     * Destroy consumer group
+     * @param {string} groupName - Name of the consumer group
+     * @returns {boolean} True if group destroyed, false if didn't exist
+     */
+    xgroupDestroy(groupName) {
+        return this.consumerGroups.delete(groupName);
+    }
+
+    /**
+     * Delete consumer from group
+     * @param {string} groupName - Name of the consumer group
+     * @param {string} consumerName - Name of the consumer
+     * @returns {number} Number of pending entries for the consumer
+     */
+    xgroupDelConsumer(groupName, consumerName) {
+        const group = this.consumerGroups.get(groupName);
+        if (!group) {
+            throw new Error("NOGROUP No such key 'streamkey' or consumer group 'groupname'");
+        }
+        
+        const consumer = group.consumers.get(consumerName);
+        if (!consumer) {
+            return 0; // Consumer doesn't exist
+        }
+        
+        // Remove consumer's pending entries
+        const pendingCount = consumer.pending.size;
+        for (const entryId of consumer.pending.keys()) {
+            group.pel.delete(entryId);
+        }
+        
+        // Remove consumer
+        group.consumers.delete(consumerName);
+        
+        return pendingCount;
+    }
+
+    /**
+     * Set last delivered ID for consumer group
+     * @param {string} groupName - Name of the consumer group
+     * @param {string} id - New last delivered ID
+     * @returns {boolean} True if successful
+     */
+    xgroupSetId(groupName, id) {
+        const group = this.consumerGroups.get(groupName);
+        if (!group) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+        
+        // Validate ID format
+        if (!this.isValidId(id) && id !== '$') {
+            throw new Error("ERR Invalid stream ID specified");
+        }
+        
+        let newId = id;
+        if (id === '$') {
+            newId = this.getLastId() || '0-0';
+        }
+        
+        group.lastDeliveredId = newId;
+        group.id = newId;
+        
+        return true;
+    }
+
+    /**
+     * Create consumer in group without reading
+     * @param {string} groupName - Name of the consumer group
+     * @param {string} consumerName - Name of the consumer
+     * @returns {boolean} True if consumer created, false if already exists
+     */
+    xgroupCreateConsumer(groupName, consumerName) {
+        const group = this.consumerGroups.get(groupName);
+        if (!group) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+        
+        if (group.consumers.has(consumerName)) {
+            return false; // Consumer already exists
+        }
+        
+        group.consumers.set(consumerName, {
+            name: consumerName,
+            pending: new Map(),
+            lastSeen: Date.now()
+        });
+        
+        return true;
+    }
+
+    /**
+     * Set stream last generated ID
+     * @param {string} id - New last generated ID
+     * @returns {boolean} True if successful
+     */
+    xsetid(id) {
+        // Validate ID format
+        if (!this.isValidId(id) && id !== '$') {
+            throw new Error("ERR Invalid stream ID specified");
+        }
+        
+        let newId = id;
+        if (id === '$') {
+            newId = this.getLastId() || '0-0';
+        }
+        
+        // Check if ID is valid (can't go backwards unless it's smaller than current entries)
+        if (this.entries.size > 0) {
+            const firstId = this.getFirstId();
+            if (this.compareIds(newId, firstId) < 0) {
+                throw new Error("ERR The ID specified in XSETID is smaller than the target stream top item");
+            }
+        }
+        
+        this.lastGeneratedId = newId;
+        
+        return true;
+    }
+
+    /**
+     * Auto-claim pending entries from idle consumers
+     * @param {string} groupName - Name of the consumer group
+     * @param {string} consumerName - Name of the claiming consumer
+     * @param {number} minIdleTime - Minimum idle time in milliseconds
+     * @param {string} start - Starting ID for claiming
+     * @param {number} count - Maximum number of entries to claim
+     * @returns {Array} Array of [next_id, [claimed_entries]]
+     */
+    xautoclaim(groupName, consumerName, minIdleTime, start = '0-0', count = -1) {
+        const group = this.consumerGroups.get(groupName);
+        if (!group) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+        
+        // Ensure claiming consumer exists
+        if (!group.consumers.has(consumerName)) {
+            group.consumers.set(consumerName, {
+                name: consumerName,
+                pending: new Map(),
+                lastSeen: Date.now()
+            });
+        }
+        
+        const claimedEntries = [];
+        const now = Date.now();
+        let nextId = start;
+        let claimedCount = 0;
+        
+        // Look for idle pending entries
+        for (const [entryId, pelEntry] of group.pel) {
+            if (this.compareIds(entryId, start) < 0) continue;
+            if (count > 0 && claimedCount >= count) break;
+            
+            const idleTime = now - pelEntry.deliveryTime;
+            if (idleTime >= minIdleTime) {
+                // Claim this entry
+                const oldConsumer = pelEntry.consumer;
+                
+                // Remove from old consumer's pending list
+                if (group.consumers.has(oldConsumer)) {
+                    group.consumers.get(oldConsumer).pending.delete(entryId);
+                }
+                
+                // Add to new consumer's pending list
+                group.consumers.get(consumerName).pending.set(entryId, {
+                    deliveryTime: now,
+                    deliveryCount: pelEntry.deliveryCount + 1
+                });
+                
+                // Update PEL
+                pelEntry.consumer = consumerName;
+                pelEntry.deliveryTime = now;
+                pelEntry.deliveryCount++;
+                
+                // Add entry to claimed list if it still exists in stream
+                if (this.entries.has(entryId)) {
+                    const entry = this.entries.get(entryId);
+                    const fieldArray = [];
+                    for (const [field, value] of Object.entries(entry.fields)) {
+                        fieldArray.push(field, value);
+                    }
+                    claimedEntries.push([entryId, fieldArray]);
+                }
+                
+                claimedCount++;
+                
+                // Update next ID
+                const parsed = this.parseId(entryId);
+                nextId = `${parsed.timestamp}-${parsed.sequence + 1}`;
+            }
+        }
+        
+        return [nextId, claimedEntries];
+    }
+
+    /**
+     * Check if stream is empty
+     * @returns {boolean} True if empty
+     */
+    isEmpty() {
+        return this.entries.size === 0;
+    }
+
+    /**
+     * Serialize for RDB storage
+     * @returns {Object} Serialized data
+     */
+    toArray() {
+        return {
+            entries: Array.from(this.entries.entries()),
+            consumerGroups: Array.from(this.consumerGroups.entries()).map(([name, group]) => [
+                name, {
+                    id: group.id,
+                    consumers: Array.from(group.consumers.entries()),
+                    pel: Array.from(group.pel.entries()),
+                    lastDeliveredId: group.lastDeliveredId
+                }
+            ]),
+            lastGeneratedId: this.lastGeneratedId,
+            maxLength: this.maxLength,
+            radixTreeApprox: this.radixTreeApprox,
+            entryCounter: this.entryCounter
+        };
+    }
+
+    /**
+     * Deserialize from RDB storage
+     * @param {Object} data - Serialized data
+     */
+    fromArray(data) {
+        this.entries = new Map(data.entries || []);
+        this.consumerGroups = new Map();
+        
+        // Restore consumer groups
+        for (const [name, groupData] of data.consumerGroups || []) {
+            this.consumerGroups.set(name, {
+                id: groupData.id,
+                consumers: new Map(groupData.consumers || []),
+                pel: new Map(groupData.pel || []),
+                lastDeliveredId: groupData.lastDeliveredId
+            });
+        }
+        
+        this.lastGeneratedId = data.lastGeneratedId || '0-0';
+        this.maxLength = data.maxLength || null;
+        this.radixTreeApprox = data.radixTreeApprox || false;
+        this.entryCounter = data.entryCounter || 0;
+    }
+}
+
 class RedisClone {
     constructor() {
         // In-memory storage for key-value pairs
@@ -2151,6 +3575,40 @@ class RedisClone {
         this.watchedKeys = new Set();
         this.watchedKeyValues = new Map(); // Store key values when WATCH is called
         
+        // AOF (Append Only File) persistence support
+        this.aofEnabled = process.argv.includes('--aof') || process.env.AOF_ENABLED === 'true';
+        this.aofFilename = process.env.AOF_FILENAME || 'redis-clone.aof';
+        this.aofSyncPolicy = process.env.AOF_SYNC_POLICY || 'everysec'; // always, everysec, no
+        this.aofBuffer = [];
+        this.aofLastSyncTime = Date.now();
+        this.aofRewriteInProgress = false;
+        
+        // Load data from AOF file if it exists
+        if (this.aofEnabled) {
+            this.loadFromAOF();
+            this.startAOFSyncTimer();
+        }
+        
+        // RDB (Redis Database) snapshot persistence support
+        this.rdbEnabled = process.argv.includes('--rdb') || process.env.RDB_ENABLED === 'true';
+        this.rdbFilename = process.env.RDB_FILENAME || 'redis-clone.rdb';
+        this.rdbSaveSeconds = parseInt(process.env.RDB_SAVE_SECONDS) || 300; // Default: 5 minutes
+        this.rdbSaveChanges = parseInt(process.env.RDB_SAVE_CHANGES) || 1; // Default: 1 change
+        this.rdbLastSaveTime = Date.now();
+        this.rdbChangesSinceLastSave = 0;
+        this.rdbBgsaveInProgress = false;
+        this.rdbAutoSaveEnabled = this.rdbEnabled && (this.rdbSaveSeconds > 0);
+        
+        // Load data from RDB file if it exists (only if AOF is not enabled)
+        if (this.rdbEnabled && !this.aofEnabled) {
+            this.loadFromRDB();
+        }
+        
+        // Start RDB auto-save timer if enabled
+        if (this.rdbAutoSaveEnabled) {
+            this.startRDBAutoSaveTimer();
+        }
+        
         // Start background cleanup for expired keys
         this.startExpirationCleanup();
         
@@ -2160,6 +3618,16 @@ class RedisClone {
         console.log('Redis-Clone Server started. Type "help" for available commands.');
         if (this.rawMode) {
             console.log('Raw mode enabled - formatting options will display properly.');
+        }
+        if (this.aofEnabled) {
+            console.log(`AOF persistence enabled (${this.aofSyncPolicy} sync policy) - data will be persisted to ${this.aofFilename}`);
+        }
+        if (this.rdbEnabled) {
+            if (this.rdbAutoSaveEnabled) {
+                console.log(`RDB snapshots enabled - auto-save every ${this.rdbSaveSeconds}s if ${this.rdbSaveChanges}+ changes, saved to ${this.rdbFilename}`);
+            } else {
+                console.log(`RDB snapshots enabled - manual snapshots only, saved to ${this.rdbFilename}`);
+            }
         }
         console.log('Use QUIT or Ctrl+C to exit.\n');
     }
@@ -2236,11 +3704,13 @@ class RedisClone {
      * Check if key exists and is of expected type
      * @param {string} key - Key to check
      * @param {string} expectedType - Expected type
-     * @returns {boolean} - True if key exists and matches type
+     * @throws {Error} - If type mismatch
      */
     checkType(key, expectedType) {
         const actualType = this.getType(key);
-        return actualType === 'none' || actualType === expectedType;
+        if (actualType !== 'none' && actualType !== expectedType) {
+            throw new Error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        }
     }
 
     /**
@@ -2365,8 +3835,93 @@ class RedisClone {
                     return this.watch(commandArgs);
                 case 'UNWATCH':
                     return this.unwatch(commandArgs);
+                case 'BGREWRITEAOF':
+                    return this.bgrewriteaof(commandArgs);
+                case 'SAVE':
+                    return this.save(commandArgs);
+                case 'BGSAVE':
+                    return this.bgsave(commandArgs);
+                case 'LASTSAVE':
+                    return this.lastsave(commandArgs);
+                // Phase 12 commands - Geospatial Data
+                case 'GEOADD':
+                    return this.geoadd(commandArgs);
+                case 'GEODIST':
+                    return this.geodist(commandArgs);
+                case 'GEOPOS':
+                    return this.geopos(commandArgs);
+                case 'GEOHASH':
+                    return this.geohash(commandArgs);
+                case 'GEORADIUS':
+                    return this.georadius(commandArgs);
+                case 'GEORADIUSBYMEMBER':
+                    return this.georadiusbymember(commandArgs);
+                case 'GEOSEARCH':
+                    return this.geosearch(commandArgs);
+                case 'GEOSEARCHSTORE':
+                    return this.geosearchstore(commandArgs);
+                // Phase 13 commands - Bitmaps & Bitfields
+                case 'SETBIT':
+                    return this.setbit(commandArgs);
+                case 'GETBIT':
+                    return this.getbit(commandArgs);
+                case 'BITCOUNT':
+                    return this.bitcount(commandArgs);
+                case 'BITPOS':
+                    return this.bitpos(commandArgs);
+                case 'BITOP':
+                    return this.bitop(commandArgs);
+                case 'BITFIELD':
+                    return this.bitfield(commandArgs);
+                case 'BITFIELD_RO':
+                    return this.bitfieldRo(commandArgs);
+                // Phase 14 commands - Streams
+                case 'XADD':
+                    return this.xadd(commandArgs);
+                case 'XREAD':
+                    return this.xread(commandArgs);
+                case 'XRANGE':
+                    return this.xrange(commandArgs);
+                case 'XREVRANGE':
+                    return this.xrevrange(commandArgs);
+                case 'XLEN':
+                    return this.xlen(commandArgs);
+                case 'XTRIM':
+                    return this.xtrim(commandArgs);
+                case 'XDEL':
+                    return this.xdel(commandArgs);
+                case 'XGROUP':
+                    return this.xgroup(commandArgs);
+                case 'XREADGROUP':
+                    return this.xreadgroup(commandArgs);
+                case 'XACK':
+                    return this.xack(commandArgs);
+                case 'XPENDING':
+                    return this.xpending(commandArgs);
+                case 'XCLAIM':
+                    return this.xclaim(commandArgs);
+                case 'XINFO':
+                    return this.xinfo(commandArgs);
+                case 'XSETID':
+                    return this.xsetid(commandArgs);
+                case 'XAUTOCLAIM':
+                    return this.xautoclaim(commandArgs);
                 case 'QUIT':
                 case 'EXIT':
+                    // Sync AOF before exit to ensure persistence
+                    if (this.aofEnabled) {
+                        this.syncAOF();
+                        console.log('AOF synchronized before shutdown.');
+                    }
+                    // Save RDB snapshot before exit if enabled and there are unsaved changes
+                    if (this.rdbEnabled && this.rdbChangesSinceLastSave > 0) {
+                        try {
+                            const keyCount = this.createRDBSnapshot();
+                            console.log(`RDB snapshot saved before shutdown: ${keyCount} keys.`);
+                        } catch (error) {
+                            console.error(`Error saving RDB on shutdown: ${error.message}`);
+                        }
+                    }
                     this.rl.close();
                     return null;
             }
@@ -2375,6 +3930,15 @@ class RedisClone {
             if (this.inTransaction) {
                 this.transactionQueue.push({ command, args: commandArgs });
                 return 'QUEUED';
+            }
+
+            // Log write commands to AOF before execution (for direct CLI commands)
+            if (this.isWriteCommand(command)) {
+                this.logToAOF(command, commandArgs);
+                // Increment RDB changes counter for auto-save
+                if (this.rdbEnabled) {
+                    this.rdbChangesSinceLastSave++;
+                }
             }
 
             // Execute commands normally when not in transaction
@@ -2994,6 +4558,53 @@ UNWATCH                     - Stop watching all keys
 === System ===
 TYPE key                     - Get the type of key (string, list, set, hash, zset, json, none)
 RAW [on|off]                - Toggle raw output mode for JSON formatting
+BGREWRITEAOF                - Rewrite AOF file in background for compaction
+SAVE                        - Save dataset to RDB snapshot synchronously
+BGSAVE                      - Save dataset to RDB snapshot in background
+LASTSAVE                    - Get timestamp of last successful RDB save
+
+=== Geospatial Commands ===
+GEOADD key longitude latitude member [longitude latitude member ...]  - Add geospatial items
+GEODIST key member1 member2 [unit]  - Get distance between members
+GEOPOS key member [member ...]      - Get positions of members
+GEOHASH key member [member ...]     - Get geohash strings for members
+GEORADIUS key longitude latitude radius unit [options]  - Search within radius from coordinates
+GEORADIUSBYMEMBER key member radius unit [options]      - Search within radius from member
+GEOSEARCH key FROMMEMBER member|FROMLONLAT lon lat BY radius unit|BYBOX width height unit [options]  - Modern geo search
+GEOSEARCHSTORE dest src FROMMEMBER member|FROMLONLAT lon lat BY radius unit|BYBOX width height unit [options]  - Store geo search results
+
+=== Bitmap Commands ===
+SETBIT key offset value      - Set bit at offset to value (0 or 1)
+GETBIT key offset            - Get bit value at offset
+BITCOUNT key [start end]     - Count set bits in range
+BITPOS key bit [start [end]] - Find first bit set to value
+BITOP operation destkey key [key ...]  - Perform bitwise operation (AND, OR, XOR, NOT)
+BITFIELD key [GET type offset] [SET type offset value] [INCRBY type offset increment] [OVERFLOW WRAP|SAT|FAIL]  - Bitfield operations
+BITFIELD_RO key [GET type offset] [GET type offset ...]  - Read-only bitfield operations
+
+=== Stream Commands ===
+XADD key id field value [field value ...]  - Add entry to stream
+XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]  - Read entries from streams
+XRANGE key start end [COUNT count]       - Get range of entries from stream
+XREVRANGE key end start [COUNT count]    - Get reverse range of entries from stream
+XLEN key                     - Get number of entries in stream
+XTRIM key MAXLEN|MINID [~] count|id      - Trim stream to maximum length or minimum ID
+XDEL key id [id ...]         - Delete entries from stream
+XSETID key id                - Set stream last generated ID
+XGROUP CREATE key groupname id  - Create consumer group
+XGROUP DESTROY key groupname    - Destroy consumer group
+XGROUP SETID key groupname id   - Set consumer group last delivered ID
+XGROUP CREATECONSUMER key groupname consumername  - Create consumer in group
+XGROUP DELCONSUMER key groupname consumername  - Delete consumer from group
+XREADGROUP GROUP group consumer [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]  - Read from stream as consumer group
+XACK key group id [id ...]   - Acknowledge processed entries
+XPENDING key group [start end count] [consumer]  - Get pending entries info
+XCLAIM key group consumer min-idle-time id [id ...] [options]  - Claim pending entries
+XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]  - Auto-claim pending entries
+XINFO STREAM key             - Get stream information
+XINFO GROUPS key             - Get consumer groups information
+XINFO CONSUMERS key group    - Get consumers information
+
 HELP                        - Show this help message
 QUIT/EXIT                   - Exit the server`;
     }
@@ -9404,9 +11015,19 @@ QUIT/EXIT                   - Exit the server`;
      * Helper method to execute a single command
      * @param {string} command - Command name
      * @param {Array<string>} args - Command arguments
+     * @param {boolean} logToAof - Whether to log this command to AOF (default: true)
      * @returns {*} - Command result
      */
-    executeCommand(command, args) {
+    executeCommand(command, args, logToAof = true) {
+        // Log write commands to AOF before execution (unless disabled)
+        if (logToAof && this.isWriteCommand(command)) {
+            this.logToAOF(command, args);
+            // Increment RDB changes counter for auto-save
+            if (this.rdbEnabled) {
+                this.rdbChangesSinceLastSave++;
+            }
+        }
+        
         switch (command) {
             // Phase 1 commands
             case 'SET': return this.set(args);
@@ -9583,6 +11204,50 @@ QUIT/EXIT                   - Exit the server`;
             case 'JSON.STRAPPEND': return this.jsonStrappend(args);
             case 'JSON.TOGGLE': return this.jsonToggle(args);
 
+            // Phase 10 commands (AOF Persistence)
+            case 'BGREWRITEAOF': return this.bgrewriteaof(args);
+
+            // Phase 11 commands (RDB Snapshots)
+            case 'SAVE': return this.save(args);
+            case 'BGSAVE': return this.bgsave(args);
+            case 'LASTSAVE': return this.lastsave(args);
+
+            // Phase 12 commands (Geospatial Data)
+            case 'GEOADD': return this.geoadd(args);
+            case 'GEODIST': return this.geodist(args);
+            case 'GEOPOS': return this.geopos(args);
+            case 'GEOHASH': return this.geohash(args);
+            case 'GEORADIUS': return this.georadius(args);
+            case 'GEORADIUSBYMEMBER': return this.georadiusbymember(args);
+            case 'GEOSEARCH': return this.geosearch(args);
+            case 'GEOSEARCHSTORE': return this.geosearchstore(args);
+
+            // Phase 13 commands (Bitmaps & Bitfields)
+            case 'SETBIT': return this.setbit(args);
+            case 'GETBIT': return this.getbit(args);
+            case 'BITCOUNT': return this.bitcount(args);
+            case 'BITPOS': return this.bitpos(args);
+            case 'BITOP': return this.bitop(args);
+            case 'BITFIELD': return this.bitfield(args);
+            case 'BITFIELD_RO': return this.bitfieldRo(args);
+
+            // Phase 14 commands (Streams)
+            case 'XADD': return this.xadd(args);
+            case 'XREAD': return this.xread(args);
+            case 'XRANGE': return this.xrange(args);
+            case 'XREVRANGE': return this.xrevrange(args);
+            case 'XLEN': return this.xlen(args);
+            case 'XTRIM': return this.xtrim(args);
+            case 'XDEL': return this.xdel(args);
+            case 'XGROUP': return this.xgroup(args);
+            case 'XREADGROUP': return this.xreadgroup(args);
+            case 'XACK': return this.xack(args);
+            case 'XPENDING': return this.xpending(args);
+            case 'XCLAIM': return this.xclaim(args);
+            case 'XINFO': return this.xinfo(args);
+            case 'XSETID': return this.xsetid(args);
+            case 'XAUTOCLAIM': return this.xautoclaim(args);
+
             default:
                 throw new Error(`ERR unknown command '${command.toLowerCase()}'`);
         }
@@ -9627,6 +11292,2158 @@ QUIT/EXIT                   - Exit the server`;
     clearWatchedKeys() {
         this.watchedKeys.clear();
         this.watchedKeyValues.clear();
+    }
+
+    // ============================================================================
+    // Phase 10: AOF (Append Only File) Persistence
+    // ============================================================================
+
+    /**
+     * Load data from AOF file if it exists
+     */
+    loadFromAOF() {
+        try {
+            if (!fs.existsSync(this.aofFilename)) {
+                console.log(`AOF enabled but no AOF file found at ${this.aofFilename}`);
+                return;
+            }
+
+            const aofContent = fs.readFileSync(this.aofFilename, 'utf8');
+            if (!aofContent.trim()) {
+                console.log('AOF file is empty');
+                return;
+            }
+
+            const commands = aofContent.trim().split('\n');
+            let loadedCommands = 0;
+
+            console.log(`Loading data from AOF file: ${this.aofFilename}`);
+
+            for (const line of commands) {
+                if (!line.trim()) continue;
+
+                try {
+                    const commandData = JSON.parse(line);
+                    const { command, args, timestamp } = commandData;
+
+                    // Replay the command without logging it again to AOF
+                    this.executeCommand(command, args, false);
+                    loadedCommands++;
+                } catch (parseError) {
+                    console.warn(`Warning: Failed to parse AOF line: ${line}`, parseError.message);
+                }
+            }
+
+            console.log(`AOF loading complete. ${loadedCommands} commands loaded.`);
+        } catch (error) {
+            console.error(`Error loading AOF file: ${error.message}`);
+        }
+    }
+
+    /**
+     * Log a command to the AOF file
+     * @param {string} command - Command name
+     * @param {Array<string>} args - Command arguments
+     */
+    logToAOF(command, args) {
+        if (!this.aofEnabled) return;
+
+        const commandData = {
+            command: command,
+            args: args,
+            timestamp: Date.now()
+        };
+
+        this.aofBuffer.push(JSON.stringify(commandData) + '\n');
+
+        // Sync based on policy
+        switch (this.aofSyncPolicy) {
+            case 'always':
+                this.syncAOF();
+                break;
+            case 'everysec':
+                if (Date.now() - this.aofLastSyncTime >= 1000) {
+                    this.syncAOF();
+                }
+                break;
+            case 'no':
+                // Let OS decide when to sync
+                break;
+        }
+    }
+
+    /**
+     * Sync AOF buffer to disk
+     */
+    syncAOF() {
+        if (this.aofBuffer.length === 0) return;
+
+        try {
+            const content = this.aofBuffer.join('');
+            fs.appendFileSync(this.aofFilename, content);
+            this.aofBuffer = [];
+            this.aofLastSyncTime = Date.now();
+        } catch (error) {
+            console.error(`Error syncing AOF: ${error.message}`);
+        }
+    }
+
+    /**
+     * Start background AOF sync timer for 'everysec' policy
+     */
+    startAOFSyncTimer() {
+        if (this.aofSyncPolicy === 'everysec') {
+            setInterval(() => {
+                if (this.aofBuffer.length > 0) {
+                    this.syncAOF();
+                }
+            }, 1000); // Sync every second
+        }
+    }
+
+    /**
+     * BGREWRITEAOF - Rewrite AOF file to compact it
+     * @param {Array<string>} args - Command arguments
+     */
+    bgrewriteaof(args) {
+        if (args.length !== 0) {
+            throw new Error("ERR wrong number of arguments for 'bgrewriteaof' command");
+        }
+
+        if (!this.aofEnabled) {
+            throw new Error("ERR AOF is not enabled");
+        }
+
+        if (this.aofRewriteInProgress) {
+            throw new Error("ERR Background AOF rewrite already in progress");
+        }
+
+        try {
+            this.aofRewriteInProgress = true;
+
+            // Sync current buffer first
+            this.syncAOF();
+
+            // Create a backup of current AOF
+            const backupFilename = `${this.aofFilename}.backup.${Date.now()}`;
+            if (fs.existsSync(this.aofFilename)) {
+                fs.copyFileSync(this.aofFilename, backupFilename);
+            }
+
+            // Generate new AOF file with current state
+            const newAofFilename = `${this.aofFilename}.tmp`;
+            const commands = [];
+
+            // Generate commands to recreate current state
+            for (const [key, value] of this.store.entries()) {
+                const type = this.getType(key);
+                
+                switch (type) {
+                    case 'string':
+                        commands.push(this.generateSetCommand(key, value));
+                        break;
+                    case 'list':
+                        commands.push(...this.generateListCommands(key, value));
+                        break;
+                    case 'set':
+                        commands.push(...this.generateSetCommands(key, value));
+                        break;
+                    case 'hash':
+                        commands.push(...this.generateHashCommands(key, value));
+                        break;
+                    case 'zset':
+                        commands.push(...this.generateZSetCommands(key, value));
+                        break;
+                    case 'json':
+                        commands.push(this.generateJsonCommand(key, value));
+                        break;
+                }
+
+                // Add expiration if set
+                if (this.expiration.has(key)) {
+                    const expireTime = this.expiration.get(key);
+                    commands.push({
+                        command: 'PEXPIREAT',
+                        args: [key, expireTime.toString()],
+                        timestamp: Date.now()
+                    });
+                }
+            }
+
+            // Write new AOF file
+            const content = commands.map(cmd => JSON.stringify(cmd) + '\n').join('');
+            fs.writeFileSync(newAofFilename, content);
+
+            // Replace old AOF with new one
+            if (fs.existsSync(this.aofFilename)) {
+                fs.unlinkSync(this.aofFilename);
+            }
+            fs.renameSync(newAofFilename, this.aofFilename);
+
+            // Clean up backup after successful rewrite
+            setTimeout(() => {
+                try {
+                    if (fs.existsSync(backupFilename)) {
+                        fs.unlinkSync(backupFilename);
+                    }
+                } catch (e) {
+                    console.warn(`Warning: Could not clean up backup file: ${e.message}`);
+                }
+            }, 5000);
+
+            this.aofRewriteInProgress = false;
+            return 'Background AOF rewrite started';
+
+        } catch (error) {
+            this.aofRewriteInProgress = false;
+            throw new Error(`ERR AOF rewrite failed: ${error.message}`);
+        }
+    }
+
+    /**
+     * Generate SET command for AOF rewrite
+     */
+    generateSetCommand(key, value) {
+        return {
+            command: 'SET',
+            args: [key, value],
+            timestamp: Date.now()
+        };
+    }
+
+    /**
+     * Generate list commands for AOF rewrite
+     */
+    generateListCommands(key, list) {
+        const commands = [];
+        const array = list.toArray();
+        
+        if (array.length > 0) {
+            commands.push({
+                command: 'RPUSH',
+                args: [key, ...array],
+                timestamp: Date.now()
+            });
+        }
+        
+        return commands;
+    }
+
+    /**
+     * Generate set commands for AOF rewrite
+     */
+    generateSetCommands(key, set) {
+        const commands = [];
+        const members = set.toArray();
+        
+        if (members.length > 0) {
+            commands.push({
+                command: 'SADD',
+                args: [key, ...members],
+                timestamp: Date.now()
+            });
+        }
+        
+        return commands;
+    }
+
+    /**
+     * Generate hash commands for AOF rewrite
+     */
+    generateHashCommands(key, hash) {
+        const commands = [];
+        const fields = [];
+        
+        for (const [field, value] of hash.fields.entries()) {
+            if (!hash.isFieldExpired(field)) {
+                fields.push(field, value);
+            }
+        }
+        
+        if (fields.length > 0) {
+            commands.push({
+                command: 'HSET',
+                args: [key, ...fields],
+                timestamp: Date.now()
+            });
+        }
+        
+        // Add field expirations
+        for (const [field, expireTime] of hash.fieldExpirations.entries()) {
+            commands.push({
+                command: 'HPEXPIREAT',
+                args: [key, expireTime.toString(), field],
+                timestamp: Date.now()
+            });
+        }
+        
+        return commands;
+    }
+
+    /**
+     * Generate sorted set commands for AOF rewrite
+     */
+    generateZSetCommands(key, zset) {
+        const commands = [];
+        const scoreMembers = [];
+        
+        for (const { member, score } of zset.toArray()) {
+            scoreMembers.push(score, member);
+        }
+        
+        if (scoreMembers.length > 0) {
+            commands.push({
+                command: 'ZADD',
+                args: [key, ...scoreMembers],
+                timestamp: Date.now()
+            });
+        }
+        
+        return commands;
+    }
+
+    /**
+     * Generate JSON command for AOF rewrite
+     */
+    generateJsonCommand(key, json) {
+        return {
+            command: 'JSON.SET',
+            args: [key, '$', JSON.stringify(json.data)],
+            timestamp: Date.now()
+        };
+    }
+
+    /**
+     * Check if a command should be logged to AOF
+     * @param {string} command - Command name
+     * @returns {boolean} - True if command should be logged
+     */
+    isWriteCommand(command) {
+        const writeCommands = new Set([
+            // String commands
+            'SET', 'MSET', 'SETNX', 'SETEX', 'PSETEX', 'APPEND', 'SETRANGE', 'INCR', 'DECR', 
+            'INCRBY', 'DECRBY', 'INCRBYFLOAT', 'GETSET', 'MSETNX', 'GETDEL',
+            
+            // Key management
+            'DEL', 'EXPIRE', 'PEXPIRE', 'EXPIREAT', 'PEXPIREAT', 'PERSIST', 'RENAME', 'RENAMENX',
+            'FLUSHALL',
+            
+            // List commands
+            'LPUSH', 'RPUSH', 'LPOP', 'RPOP', 'LSET', 'LTRIM', 'LINSERT', 'LPUSHX', 'RPUSHX',
+            'LREM', 'RPOPLPUSH', 'LMOVE', 'LMPOP',
+            
+            // Set commands
+            'SADD', 'SREM', 'SPOP', 'SMOVE', 'SUNIONSTORE', 'SINTERSTORE', 'SDIFFSTORE',
+            
+            // Hash commands
+            'HSET', 'HDEL', 'HINCRBY', 'HINCRBYFLOAT', 'HSETNX', 'HMSET', 'HGETDEL',
+            'HEXPIRE', 'HEXPIREAT', 'HPEXPIRE', 'HPEXPIREAT', 'HPERSIST',
+            
+            // Sorted set commands
+            'ZADD', 'ZREM', 'ZINCRBY', 'ZREMRANGEBYRANK', 'ZREMRANGEBYSCORE', 'ZREMRANGEBYLEX',
+            'ZPOPMIN', 'ZPOPMAX', 'ZUNIONSTORE', 'ZINTERSTORE', 'ZDIFFSTORE', 'ZMPOP', 'ZRANGESTORE',
+            
+            // JSON commands
+            'JSON.SET', 'JSON.DEL', 'JSON.ARRAPPEND', 'JSON.ARRINSERT', 'JSON.ARRPOP', 'JSON.ARRTRIM',
+            'JSON.NUMINCRBY', 'JSON.NUMMULTBY', 'JSON.STRAPPEND', 'JSON.TOGGLE', 'JSON.CLEAR',
+            'JSON.MSET', 'JSON.MERGE',
+            
+            // Geospatial commands
+            'GEOADD', 'GEOSEARCHSTORE',
+            
+            // Bitmap commands
+            'SETBIT', 'BITOP', 'BITFIELD',
+            
+            // Stream commands
+            'XADD', 'XTRIM', 'XDEL', 'XSETID', 'XGROUP', 'XACK', 'XCLAIM', 'XAUTOCLAIM'
+        ]);
+        
+        return writeCommands.has(command);
+    }
+
+    // ============================================================================
+    // Phase 11: RDB (Redis Database) Snapshots
+    // ============================================================================
+
+    /**
+     * Load data from RDB file if it exists
+     */
+    loadFromRDB() {
+        try {
+            if (!fs.existsSync(this.rdbFilename)) {
+                console.log(`RDB enabled but no RDB file found at ${this.rdbFilename}`);
+                return;
+            }
+
+            const rdbContent = fs.readFileSync(this.rdbFilename, 'utf8');
+            if (!rdbContent.trim()) {
+                console.log('RDB file is empty');
+                return;
+            }
+
+            console.log(`Loading data from RDB file: ${this.rdbFilename}`);
+
+            const snapshot = JSON.parse(rdbContent);
+            const { timestamp, data, expirations, version } = snapshot;
+
+            // Validate RDB format
+            if (!data || !timestamp) {
+                throw new Error('Invalid RDB file format');
+            }
+
+            console.log(`RDB snapshot from ${new Date(timestamp).toISOString()}`);
+
+            // Restore data
+            let loadedKeys = 0;
+            for (const [key, value] of Object.entries(data)) {
+                // Restore the actual data structure
+                this.data.set(key, this.deserializeValue(value));
+                loadedKeys++;
+            }
+
+            // Restore expirations
+            if (expirations) {
+                for (const [key, expireTime] of Object.entries(expirations)) {
+                    if (expireTime > Date.now()) {
+                        this.expiration.set(key, expireTime);
+                    }
+                }
+            }
+
+            this.rdbLastSaveTime = timestamp;
+            this.rdbChangesSinceLastSave = 0;
+
+            console.log(`RDB loading complete. ${loadedKeys} keys loaded.`);
+        } catch (error) {
+            console.error(`Error loading RDB file: ${error.message}`);
+        }
+    }
+
+    /**
+     * Start RDB auto-save timer
+     */
+    startRDBAutoSaveTimer() {
+        setInterval(() => {
+            if (this.rdbChangesSinceLastSave >= this.rdbSaveChanges) {
+                const timeSinceLastSave = (Date.now() - this.rdbLastSaveTime) / 1000;
+                if (timeSinceLastSave >= this.rdbSaveSeconds) {
+                    console.log(`Auto-saving RDB: ${this.rdbChangesSinceLastSave} changes in ${Math.round(timeSinceLastSave)}s`);
+                    try {
+                        this.createRDBSnapshot();
+                        console.log('Auto-save completed');
+                    } catch (error) {
+                        console.error(`Auto-save failed: ${error.message}`);
+                    }
+                }
+            }
+        }, 1000); // Check every second
+    }
+
+    /**
+     * Create RDB snapshot of current dataset
+     */
+    createRDBSnapshot() {
+        const snapshot = {
+            version: '1.0',
+            timestamp: Date.now(),
+            data: {},
+            expirations: {}
+        };
+
+        // Serialize all data
+        for (const [key, value] of this.data.entries()) {
+            // Skip expired keys
+            if (!this.isKeyExpired(key)) {
+                snapshot.data[key] = this.serializeValue(value);
+                
+                // Include expiration if set
+                if (this.expiration.has(key)) {
+                    snapshot.expirations[key] = this.expiration.get(key);
+                }
+            }
+        }
+
+        // Write to RDB file
+        const rdbContent = JSON.stringify(snapshot, null, 2);
+        
+        // Create backup of existing RDB file
+        if (fs.existsSync(this.rdbFilename)) {
+            const backupFilename = `${this.rdbFilename}.backup.${Date.now()}`;
+            fs.copyFileSync(this.rdbFilename, backupFilename);
+            
+            // Clean up old backups (keep only last 3)
+            setTimeout(() => {
+                try {
+                    const backupFiles = fs.readdirSync('.')
+                        .filter(file => file.startsWith(`${this.rdbFilename}.backup.`))
+                        .sort();
+                    
+                    if (backupFiles.length > 3) {
+                        for (let i = 0; i < backupFiles.length - 3; i++) {
+                            fs.unlinkSync(backupFiles[i]);
+                        }
+                    }
+                } catch (e) {
+                    // Ignore cleanup errors
+                }
+            }, 1000);
+        }
+
+        fs.writeFileSync(this.rdbFilename, rdbContent);
+        
+        this.rdbLastSaveTime = Date.now();
+        this.rdbChangesSinceLastSave = 0;
+        
+        return Object.keys(snapshot.data).length;
+    }
+
+    /**
+     * Serialize a value for RDB storage
+     */
+    serializeValue(value) {
+        if (typeof value === 'string') {
+            return { type: 'string', data: value };
+        } else if (value instanceof RedisList) {
+            return { type: 'list', data: value.toArray() };
+        } else if (value instanceof RedisSet) {
+            return { type: 'set', data: value.toArray() };
+        } else if (value instanceof RedisHash) {
+            return { 
+                type: 'hash', 
+                data: value.toObject(),
+                fieldExpirations: Object.fromEntries(value.fieldExpirations)
+            };
+        } else if (value instanceof RedisSortedSet) {
+            return { type: 'zset', data: value.toArray() };
+        } else if (value instanceof RedisJSON) {
+            return { type: 'json', data: value.toObject() };
+        } else if (value instanceof RedisGeo) {
+            return { type: 'geo', data: value.toArray() };
+        } else if (value instanceof RedisBitmap) {
+            return { type: 'bitmap', data: value.toArray() };
+        } else if (value instanceof RedisStream) {
+            return { type: 'stream', data: value.toArray() };
+        } else {
+            return { type: 'unknown', data: value };
+        }
+    }
+
+    /**
+     * Deserialize a value from RDB storage
+     */
+    deserializeValue(serialized) {
+        const { type, data, fieldExpirations } = serialized;
+        
+        switch (type) {
+            case 'string':
+                return data;
+            case 'list':
+                const list = new RedisList();
+                if (data.length > 0) {
+                    list.rpush(...data);
+                }
+                return list;
+            case 'set':
+                const set = new RedisSet();
+                if (data.length > 0) {
+                    set.sadd(...data);
+                }
+                return set;
+            case 'hash':
+                const hash = new RedisHash();
+                for (const [field, value] of Object.entries(data)) {
+                    hash.hset(field, value);
+                }
+                // Restore field expirations
+                if (fieldExpirations) {
+                    for (const [field, expireTime] of Object.entries(fieldExpirations)) {
+                        if (expireTime > Date.now()) {
+                            hash.setFieldExpiration(field, expireTime);
+                        }
+                    }
+                }
+                return hash;
+            case 'zset':
+                const zset = new RedisSortedSet();
+                for (const { member, score } of data) {
+                    zset.zadd(score, member);
+                }
+                return zset;
+            case 'json':
+                const json = new RedisJSON();
+                json.data = data;
+                return json;
+            case 'geo':
+                const geo = new RedisGeo();
+                for (const { member, longitude, latitude } of data) {
+                    geo.geoadd(longitude, latitude, member);
+                }
+                return geo;
+            case 'bitmap':
+                const bitmap = new RedisBitmap();
+                bitmap.fromArray(data);
+                return bitmap;
+            case 'stream':
+                const stream = new RedisStream();
+                stream.fromArray(data);
+                return stream;
+            default:
+                return data;
+        }
+    }
+
+    /**
+     * SAVE - Save dataset to RDB snapshot synchronously
+     * @param {Array<string>} args - Command arguments
+     */
+    save(args) {
+        if (args.length !== 0) {
+            throw new Error("ERR wrong number of arguments for 'save' command");
+        }
+
+        if (!this.rdbEnabled) {
+            throw new Error("ERR RDB snapshots are not enabled");
+        }
+
+        try {
+            const keyCount = this.createRDBSnapshot();
+            return `OK - ${keyCount} keys saved to ${this.rdbFilename}`;
+        } catch (error) {
+            throw new Error(`ERR failed to save RDB snapshot: ${error.message}`);
+        }
+    }
+
+    /**
+     * BGSAVE - Save dataset to RDB snapshot in background
+     * @param {Array<string>} args - Command arguments
+     */
+    bgsave(args) {
+        if (args.length !== 0) {
+            throw new Error("ERR wrong number of arguments for 'bgsave' command");
+        }
+
+        if (!this.rdbEnabled) {
+            throw new Error("ERR RDB snapshots are not enabled");
+        }
+
+        if (this.rdbBgsaveInProgress) {
+            throw new Error("ERR Background save already in progress");
+        }
+
+        // Simulate background save (in a real implementation, this would use worker threads)
+        this.rdbBgsaveInProgress = true;
+        
+        setTimeout(() => {
+            try {
+                const keyCount = this.createRDBSnapshot();
+                this.rdbBgsaveInProgress = false;
+                console.log(`Background RDB save completed: ${keyCount} keys saved`);
+            } catch (error) {
+                this.rdbBgsaveInProgress = false;
+                console.error(`Background RDB save failed: ${error.message}`);
+            }
+        }, 100); // Small delay to simulate background operation
+
+        return 'Background saving started';
+    }
+
+    /**
+     * LASTSAVE - Get timestamp of last successful RDB save
+     * @param {Array<string>} args - Command arguments
+     */
+    lastsave(args) {
+        if (args.length !== 0) {
+            throw new Error("ERR wrong number of arguments for 'lastsave' command");
+        }
+
+        return `(integer) ${Math.floor(this.rdbLastSaveTime / 1000)}`;
+    }
+
+    // ============================================================================
+    // Phase 12: Geospatial Data Commands
+    // ============================================================================
+
+    /**
+     * GEOADD key longitude latitude member [longitude latitude member ...]
+     * Add geospatial items to a geo index (sorted set)
+     * @param {Array<string>} args - Command arguments
+     */
+    geoadd(args) {
+        if (args.length < 4 || (args.length - 1) % 3 !== 0) {
+            throw new Error("ERR wrong number of arguments for 'geoadd' command");
+        }
+
+        const key = args[0];
+        const items = args.slice(1);
+
+        // Check type if key exists
+        if (this.data.has(key)) {
+            this.checkType(key, 'geo');
+        }
+
+        let geo = this.data.get(key);
+        if (!geo) {
+            geo = new RedisGeo();
+            this.setValue(key, geo, 'geo');
+        }
+
+        const added = geo.geoadd(...items);
+        
+        if (geo.isEmpty()) {
+            this.deleteKey(key);
+        }
+
+        return `(integer) ${added}`;
+    }
+
+    /**
+     * GEODIST key member1 member2 [unit]
+     * Get distance between two geospatial members
+     * @param {Array<string>} args - Command arguments
+     */
+    geodist(args) {
+        if (args.length < 3 || args.length > 4) {
+            throw new Error("ERR wrong number of arguments for 'geodist' command");
+        }
+
+        const key = args[0];
+        const member1 = args[1];
+        const member2 = args[2];
+        const unit = args[3] || 'm';
+
+        if (!this.data.has(key)) {
+            return '(nil)';
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+        
+        const distance = geo.geodist(member1, member2, unit);
+        return distance === null ? '(nil)' : `"${distance}"`;
+    }
+
+    /**
+     * GEOPOS key member [member ...]
+     * Get positions (longitude, latitude) of geospatial members
+     * @param {Array<string>} args - Command arguments
+     */
+    geopos(args) {
+        if (args.length < 2) {
+            throw new Error("ERR wrong number of arguments for 'geopos' command");
+        }
+
+        const key = args[0];
+        const members = args.slice(1);
+
+        if (!this.data.has(key)) {
+            return members.map(() => '(nil)');
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+        
+        const positions = geo.geopos(...members);
+        return positions.map(pos => {
+            if (pos === null) {
+                return '(nil)';
+            }
+            return [`"${pos[0]}"`, `"${pos[1]}"`];
+        });
+    }
+
+    /**
+     * GEOHASH key member [member ...]
+     * Get geohash strings for geospatial members
+     * @param {Array<string>} args - Command arguments
+     */
+    geohash(args) {
+        if (args.length < 2) {
+            throw new Error("ERR wrong number of arguments for 'geohash' command");
+        }
+
+        const key = args[0];
+        const members = args.slice(1);
+
+        if (!this.data.has(key)) {
+            return members.map(() => '(nil)');
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+        
+        const hashes = geo.geohash(...members);
+        return hashes.map(hash => hash === null ? '(nil)' : `"${hash}"`);
+    }
+
+    /**
+     * GEORADIUS key longitude latitude radius unit [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC]
+     * Search for members within radius from coordinates
+     * @param {Array<string>} args - Command arguments
+     */
+    georadius(args) {
+        if (args.length < 5) {
+            throw new Error("ERR wrong number of arguments for 'georadius' command");
+        }
+
+        const key = args[0];
+        const longitude = parseFloat(args[1]);
+        const latitude = parseFloat(args[2]);
+        const radius = parseFloat(args[3]);
+        const unit = args[4];
+        
+        if (isNaN(longitude) || isNaN(latitude) || isNaN(radius)) {
+            throw new Error("ERR value is not a valid float");
+        }
+
+        if (!this.data.has(key)) {
+            return [];
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+
+        // Parse options
+        const options = {};
+        for (let i = 5; i < args.length; i++) {
+            const option = args[i].toUpperCase();
+            switch (option) {
+                case 'WITHCOORD':
+                    options.WITHCOORD = true;
+                    break;
+                case 'WITHDIST':
+                    options.WITHDIST = true;
+                    break;
+                case 'WITHHASH':
+                    options.WITHHASH = true;
+                    break;
+                case 'ASC':
+                    options.ASC = true;
+                    break;
+                case 'DESC':
+                    options.DESC = true;
+                    break;
+                case 'COUNT':
+                    if (i + 1 < args.length) {
+                        options.COUNT = parseInt(args[i + 1]);
+                        i++; // Skip the count value
+                    }
+                    break;
+            }
+        }
+
+        const results = geo.georadius(longitude, latitude, radius, unit, options);
+        return this.formatGeoResults(results, options);
+    }
+
+    /**
+     * GEORADIUSBYMEMBER key member radius unit [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC]
+     * Search for members within radius from another member
+     * @param {Array<string>} args - Command arguments
+     */
+    georadiusbymember(args) {
+        if (args.length < 4) {
+            throw new Error("ERR wrong number of arguments for 'georadiusbymember' command");
+        }
+
+        const key = args[0];
+        const member = args[1];
+        const radius = parseFloat(args[2]);
+        const unit = args[3];
+        
+        if (isNaN(radius)) {
+            throw new Error("ERR value is not a valid float");
+        }
+
+        if (!this.data.has(key)) {
+            return [];
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+
+        // Parse options (same as GEORADIUS)
+        const options = {};
+        for (let i = 4; i < args.length; i++) {
+            const option = args[i].toUpperCase();
+            switch (option) {
+                case 'WITHCOORD':
+                    options.WITHCOORD = true;
+                    break;
+                case 'WITHDIST':
+                    options.WITHDIST = true;
+                    break;
+                case 'WITHHASH':
+                    options.WITHHASH = true;
+                    break;
+                case 'ASC':
+                    options.ASC = true;
+                    break;
+                case 'DESC':
+                    options.DESC = true;
+                    break;
+                case 'COUNT':
+                    if (i + 1 < args.length) {
+                        options.COUNT = parseInt(args[i + 1]);
+                        i++; // Skip the count value
+                    }
+                    break;
+            }
+        }
+
+        const results = geo.georadiusbymember(member, radius, unit, options);
+        return this.formatGeoResults(results, options);
+    }
+
+    /**
+     * GEOSEARCH key FROMMEMBER member|FROMLONLAT longitude latitude BYRADIUS radius unit|BYBOX width height unit [options]
+     * Modern geospatial search command (Redis 6.2+)
+     * @param {Array<string>} args - Command arguments
+     */
+    geosearch(args) {
+        if (args.length < 6) {
+            throw new Error("ERR wrong number of arguments for 'geosearch' command");
+        }
+
+        const key = args[0];
+        
+        if (!this.data.has(key)) {
+            return [];
+        }
+
+        this.checkType(key, 'geo');
+        const geo = this.data.get(key);
+
+        // Parse search origin
+        let fromMember = null;
+        let longitude = null;
+        let latitude = null;
+        let argIndex = 1;
+
+        if (args[argIndex].toUpperCase() === 'FROMMEMBER') {
+            fromMember = args[argIndex + 1];
+            argIndex += 2;
+        } else if (args[argIndex].toUpperCase() === 'FROMLONLAT') {
+            longitude = parseFloat(args[argIndex + 1]);
+            latitude = parseFloat(args[argIndex + 2]);
+            if (isNaN(longitude) || isNaN(latitude)) {
+                throw new Error("ERR value is not a valid float");
+            }
+            argIndex += 3;
+        } else {
+            throw new Error("ERR GEOSEARCH requires FROMMEMBER or FROMLONLAT");
+        }
+
+        // Parse shape
+        let shape = {};
+        if (args[argIndex].toUpperCase() === 'BYRADIUS') {
+            shape.radius = parseFloat(args[argIndex + 1]);
+            shape.unit = args[argIndex + 2];
+            if (isNaN(shape.radius)) {
+                throw new Error("ERR value is not a valid float");
+            }
+            argIndex += 3;
+        } else if (args[argIndex].toUpperCase() === 'BYBOX') {
+            shape.width = parseFloat(args[argIndex + 1]);
+            shape.height = parseFloat(args[argIndex + 2]);
+            shape.unit = args[argIndex + 3];
+            if (isNaN(shape.width) || isNaN(shape.height)) {
+                throw new Error("ERR value is not a valid float");
+            }
+            argIndex += 4;
+        } else {
+            throw new Error("ERR GEOSEARCH requires BYRADIUS or BYBOX");
+        }
+
+        // Parse options
+        const options = {};
+        for (let i = argIndex; i < args.length; i++) {
+            const option = args[i].toUpperCase();
+            switch (option) {
+                case 'WITHCOORD':
+                    options.WITHCOORD = true;
+                    break;
+                case 'WITHDIST':
+                    options.WITHDIST = true;
+                    break;
+                case 'WITHHASH':
+                    options.WITHHASH = true;
+                    break;
+                case 'ASC':
+                    options.ASC = true;
+                    break;
+                case 'DESC':
+                    options.DESC = true;
+                    break;
+                case 'COUNT':
+                    if (i + 1 < args.length) {
+                        options.COUNT = parseInt(args[i + 1]);
+                        i++; // Skip the count value
+                    }
+                    break;
+            }
+        }
+
+        const results = geo.geosearch(fromMember, longitude, latitude, shape, options);
+        return this.formatGeoResults(results, options);
+    }
+
+    /**
+     * GEOSEARCHSTORE destination source FROMMEMBER member|FROMLONLAT longitude latitude BYRADIUS radius unit|BYBOX width height unit [options]
+     * Store GEOSEARCH results in destination key
+     * @param {Array<string>} args - Command arguments
+     */
+    geosearchstore(args) {
+        if (args.length < 7) {
+            throw new Error("ERR wrong number of arguments for 'geosearchstore' command");
+        }
+
+        const destination = args[0];
+        const newArgs = args.slice(1); // Remove destination, pass rest to geosearch
+        
+        // Execute geosearch to get results
+        const results = this.geosearch(newArgs);
+        
+        if (results.length === 0) {
+            return '(integer) 0';
+        }
+
+        // Create new geo index with results
+        const destGeo = new RedisGeo();
+        let stored = 0;
+
+        for (const result of results) {
+            if (Array.isArray(result)) {
+                // Simple member name
+                const member = result[0] || result;
+                // We need to get coordinates from original geo
+                const sourceKey = newArgs[0];
+                if (this.data.has(sourceKey)) {
+                    const sourceGeo = this.data.get(sourceKey);
+                    const coords = sourceGeo.geopos(member)[0];
+                    if (coords) {
+                        destGeo.geoadd(coords[0], coords[1], member);
+                        stored++;
+                    }
+                }
+            } else if (result.member) {
+                // Result object with member and potentially coordinates
+                const member = result.member;
+                if (result.coordinates) {
+                    destGeo.geoadd(result.coordinates[0], result.coordinates[1], member);
+                    stored++;
+                }
+            }
+        }
+
+        if (stored > 0) {
+            this.setValue(destination, destGeo, 'geo');
+        }
+
+        return `(integer) ${stored}`;
+    }
+
+    /**
+     * Format geospatial search results for output
+     * @param {Array} results - Raw search results
+     * @param {Object} options - Formatting options
+     * @returns {Array} Formatted results
+     */
+    formatGeoResults(results, options) {
+        return results.map(result => {
+            const formatted = [`"${result.member}"`];
+            
+            if (options.WITHDIST) {
+                formatted.push(`"${result.distanceFormatted}"`);
+            }
+            
+            if (options.WITHHASH) {
+                formatted.push(`(integer) ${result.geohash}`);
+            }
+            
+            if (options.WITHCOORD) {
+                formatted.push([`"${result.coordinates[0]}"`, `"${result.coordinates[1]}"`]);
+            }
+            
+            return formatted.length === 1 ? formatted[0] : formatted;
+        });
+    }
+
+    // ============================================================================
+    // Phase 13: Bitmap & Bitfield Commands
+    // ============================================================================
+
+    /**
+     * SETBIT key offset value
+     * Set bit at specified offset to value (0 or 1)
+     * @param {Array<string>} args - Command arguments
+     */
+    setbit(args) {
+        if (args.length !== 3) {
+            throw new Error("ERR wrong number of arguments for 'setbit' command");
+        }
+
+        const key = args[0];
+        const offset = parseInt(args[1]);
+        const value = parseInt(args[2]);
+
+        if (isNaN(offset) || offset < 0) {
+            throw new Error("ERR bit offset is not an integer or out of range");
+        }
+
+        if (value !== 0 && value !== 1) {
+            throw new Error("ERR bit is not an integer or out of range");
+        }
+
+        // Check type if key exists
+        if (this.data.has(key)) {
+            this.checkType(key, 'bitmap');
+        }
+
+        let bitmap = this.data.get(key);
+        if (!bitmap) {
+            bitmap = new RedisBitmap();
+            this.setValue(key, bitmap, 'bitmap');
+        }
+
+        const previousValue = bitmap.setbit(offset, value);
+        
+        if (bitmap.isEmpty()) {
+            this.deleteKey(key);
+        }
+
+        return `(integer) ${previousValue}`;
+    }
+
+    /**
+     * GETBIT key offset
+     * Get bit value at specified offset
+     * @param {Array<string>} args - Command arguments
+     */
+    getbit(args) {
+        if (args.length !== 2) {
+            throw new Error("ERR wrong number of arguments for 'getbit' command");
+        }
+
+        const key = args[0];
+        const offset = parseInt(args[1]);
+
+        if (isNaN(offset) || offset < 0) {
+            throw new Error("ERR bit offset is not an integer or out of range");
+        }
+
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'bitmap');
+        const bitmap = this.data.get(key);
+        
+        const bit = bitmap.getbit(offset);
+        return `(integer) ${bit}`;
+    }
+
+    /**
+     * BITCOUNT key [start end]
+     * Count number of set bits in range
+     * @param {Array<string>} args - Command arguments
+     */
+    bitcount(args) {
+        if (args.length < 1 || args.length > 3) {
+            throw new Error("ERR wrong number of arguments for 'bitcount' command");
+        }
+
+        const key = args[0];
+        
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'bitmap');
+        const bitmap = this.data.get(key);
+
+        let start = 0;
+        let end = -1;
+
+        if (args.length >= 2) {
+            start = parseInt(args[1]);
+            if (isNaN(start)) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+        }
+
+        if (args.length >= 3) {
+            end = parseInt(args[2]);
+            if (isNaN(end)) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+        }
+
+        const count = bitmap.bitcount(start, end);
+        return `(integer) ${count}`;
+    }
+
+    /**
+     * BITPOS key bit [start [end]]
+     * Find first bit set to specified value
+     * @param {Array<string>} args - Command arguments
+     */
+    bitpos(args) {
+        if (args.length < 2 || args.length > 4) {
+            throw new Error("ERR wrong number of arguments for 'bitpos' command");
+        }
+
+        const key = args[0];
+        const bit = parseInt(args[1]);
+
+        if (bit !== 0 && bit !== 1) {
+            throw new Error("ERR bit is not an integer or out of range");
+        }
+
+        if (!this.data.has(key)) {
+            return bit === 0 ? '(integer) 0' : '(integer) -1';
+        }
+
+        this.checkType(key, 'bitmap');
+        const bitmap = this.data.get(key);
+
+        let start = 0;
+        let end = -1;
+
+        if (args.length >= 3) {
+            start = parseInt(args[2]);
+            if (isNaN(start)) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+            start = start * 8; // Convert byte position to bit position
+        }
+
+        if (args.length >= 4) {
+            end = parseInt(args[3]);
+            if (isNaN(end)) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+            end = end * 8 + 7; // Convert byte position to bit position (end of byte)
+        }
+
+        const position = bitmap.bitpos(bit, start, end);
+        return `(integer) ${position}`;
+    }
+
+    /**
+     * BITOP operation destkey key [key ...]
+     * Perform bitwise operation between bitmaps
+     * @param {Array<string>} args - Command arguments
+     */
+    bitop(args) {
+        if (args.length < 3) {
+            throw new Error("ERR wrong number of arguments for 'bitop' command");
+        }
+
+        const operation = args[0].toUpperCase();
+        const destKey = args[1];
+        const sourceKeys = args.slice(2);
+
+        if (!['AND', 'OR', 'XOR', 'NOT'].includes(operation)) {
+            throw new Error("ERR operation must be AND, OR, XOR, or NOT");
+        }
+
+        if (operation === 'NOT' && sourceKeys.length !== 1) {
+            throw new Error("ERR BITOP NOT must be called with a single source key");
+        }
+
+        // Get source bitmaps
+        const sourceBitmaps = [];
+        for (const key of sourceKeys) {
+            if (this.data.has(key)) {
+                this.checkType(key, 'bitmap');
+                sourceBitmaps.push(this.data.get(key));
+            } else {
+                sourceBitmaps.push(new RedisBitmap()); // Empty bitmap
+            }
+        }
+
+        let result;
+        if (operation === 'NOT') {
+            result = sourceBitmaps[0].bitop('NOT');
+        } else {
+            result = sourceBitmaps[0];
+            for (let i = 1; i < sourceBitmaps.length; i++) {
+                result = result.bitop(operation, sourceBitmaps[i]);
+            }
+        }
+
+        // Store result
+        if (result.isEmpty()) {
+            this.deleteKey(destKey);
+        } else {
+            this.setValue(destKey, result, 'bitmap');
+        }
+
+        return `(integer) ${result.size()}`;
+    }
+
+    /**
+     * BITFIELD key [GET type offset] [SET type offset value] [INCRBY type offset increment] [OVERFLOW WRAP|SAT|FAIL]
+     * Perform bitfield operations
+     * @param {Array<string>} args - Command arguments
+     */
+    bitfield(args) {
+        if (args.length < 1) {
+            throw new Error("ERR wrong number of arguments for 'bitfield' command");
+        }
+
+        const key = args[0];
+        
+        // Check type if key exists
+        if (this.data.has(key)) {
+            this.checkType(key, 'bitmap');
+        }
+
+        let bitmap = this.data.get(key);
+        if (!bitmap) {
+            bitmap = new RedisBitmap();
+            this.setValue(key, bitmap, 'bitmap');
+        }
+
+        // Parse operations
+        const operations = [];
+        let i = 1;
+
+        while (i < args.length) {
+            const command = args[i].toUpperCase();
+            
+            switch (command) {
+                case 'GET':
+                    if (i + 2 >= args.length) {
+                        throw new Error("ERR syntax error");
+                    }
+                    operations.push({
+                        command: 'GET',
+                        type: args[i + 1],
+                        offset: args[i + 2]
+                    });
+                    i += 3;
+                    break;
+                
+                case 'SET':
+                    if (i + 3 >= args.length) {
+                        throw new Error("ERR syntax error");
+                    }
+                    operations.push({
+                        command: 'SET',
+                        type: args[i + 1],
+                        offset: args[i + 2],
+                        value: parseInt(args[i + 3])
+                    });
+                    i += 4;
+                    break;
+                
+                case 'INCRBY':
+                    if (i + 3 >= args.length) {
+                        throw new Error("ERR syntax error");
+                    }
+                    operations.push({
+                        command: 'INCRBY',
+                        type: args[i + 1],
+                        offset: args[i + 2],
+                        value: parseInt(args[i + 3])
+                    });
+                    i += 4;
+                    break;
+                
+                case 'OVERFLOW':
+                    if (i + 1 >= args.length) {
+                        throw new Error("ERR syntax error");
+                    }
+                    const behavior = args[i + 1].toUpperCase();
+                    if (!['WRAP', 'SAT', 'FAIL'].includes(behavior)) {
+                        throw new Error("ERR Invalid overflow type, must be WRAP, SAT or FAIL");
+                    }
+                    operations.push({
+                        behavior: behavior
+                    });
+                    i += 2;
+                    break;
+                
+                default:
+                    throw new Error("ERR syntax error");
+            }
+        }
+
+        if (operations.length === 0) {
+            throw new Error("ERR syntax error");
+        }
+
+        const results = bitmap.bitfield(operations);
+        
+        if (bitmap.isEmpty()) {
+            this.deleteKey(key);
+        }
+
+        // Format results
+        return results.map(result => {
+            if (result === null) {
+                return '(nil)';
+            }
+            return `(integer) ${result}`;
+        });
+    }
+
+    /**
+     * BITFIELD_RO key [GET type offset] [GET type offset ...]
+     * Read-only bitfield operations (Redis 6.0+)
+     * @param {Array<string>} args - Command arguments
+     */
+    bitfieldRo(args) {
+        if (args.length < 1) {
+            throw new Error("ERR wrong number of arguments for 'bitfield_ro' command");
+        }
+
+        const key = args[0];
+        
+        if (!this.data.has(key)) {
+            // Return array of zeros for non-existent key
+            const numOperations = Math.floor((args.length - 1) / 3);
+            return new Array(numOperations).fill('(integer) 0');
+        }
+
+        this.checkType(key, 'bitmap');
+        const bitmap = this.data.get(key);
+
+        // Parse operations - only GET is allowed
+        const operations = [];
+        let i = 1;
+
+        while (i < args.length) {
+            const command = args[i].toUpperCase();
+            
+            if (command !== 'GET') {
+                throw new Error("ERR BITFIELD_RO only supports GET operations");
+            }
+            
+            if (i + 2 >= args.length) {
+                throw new Error("ERR syntax error");
+            }
+            
+            operations.push({
+                command: 'GET',
+                type: args[i + 1],
+                offset: args[i + 2]
+            });
+            i += 3;
+        }
+
+        if (operations.length === 0) {
+            throw new Error("ERR syntax error");
+        }
+
+        const results = bitmap.bitfield(operations);
+
+        // Format results
+        return results.map(result => {
+            if (result === null) {
+                return '(nil)';
+            }
+            return `(integer) ${result}`;
+        });
+    }
+
+    // ============================================================================
+    // Phase 14: Stream Commands
+    // ============================================================================
+
+    /**
+     * XADD key id field value [field value ...]
+     * Add entry to stream
+     * @param {Array<string>} args - Command arguments
+     */
+    xadd(args) {
+        if (args.length < 4 || args.length % 2 !== 0) {
+            throw new Error("ERR wrong number of arguments for 'xadd' command");
+        }
+
+        const key = args[0];
+        const id = args[1];
+        const fieldValues = args.slice(2);
+
+        // Check type if key exists
+        if (this.data.has(key)) {
+            this.checkType(key, 'stream');
+        }
+
+        let stream = this.data.get(key);
+        if (!stream) {
+            stream = new RedisStream();
+            this.setValue(key, stream, 'stream');
+        }
+
+        try {
+            const entryId = stream.xadd(id, fieldValues);
+            return `"${entryId}"`;
+        } catch (error) {
+            throw new Error(error.message);
+        }
+    }
+
+    /**
+     * XLEN key
+     * Get number of entries in stream
+     * @param {Array<string>} args - Command arguments
+     */
+    xlen(args) {
+        if (args.length !== 1) {
+            throw new Error("ERR wrong number of arguments for 'xlen' command");
+        }
+
+        const key = args[0];
+
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        return `(integer) ${stream.xlen()}`;
+    }
+
+    /**
+     * XRANGE key start end [COUNT count]
+     * Get range of entries from stream
+     * @param {Array<string>} args - Command arguments
+     */
+    xrange(args) {
+        if (args.length < 3 || args.length > 5) {
+            throw new Error("ERR wrong number of arguments for 'xrange' command");
+        }
+
+        const key = args[0];
+        const start = args[1];
+        const end = args[2];
+        let count = -1;
+
+        // Parse COUNT option
+        if (args.length === 5 && args[3].toUpperCase() === 'COUNT') {
+            count = parseInt(args[4]);
+            if (isNaN(count) || count < 0) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+        }
+
+        if (!this.data.has(key)) {
+            return [];
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        const entries = stream.xrange(start, end, count);
+        return this.formatStreamEntries(entries);
+    }
+
+    /**
+     * XREVRANGE key end start [COUNT count]
+     * Get reverse range of entries from stream
+     * @param {Array<string>} args - Command arguments
+     */
+    xrevrange(args) {
+        if (args.length < 3 || args.length > 5) {
+            throw new Error("ERR wrong number of arguments for 'xrevrange' command");
+        }
+
+        const key = args[0];
+        const start = args[1];
+        const end = args[2];
+        let count = -1;
+
+        // Parse COUNT option
+        if (args.length === 5 && args[3].toUpperCase() === 'COUNT') {
+            count = parseInt(args[4]);
+            if (isNaN(count) || count < 0) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+        }
+
+        if (!this.data.has(key)) {
+            return [];
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        const entries = stream.xrevrange(start, end, count);
+        return this.formatStreamEntries(entries);
+    }
+
+    /**
+     * XDEL key id [id ...]
+     * Delete entries from stream
+     * @param {Array<string>} args - Command arguments
+     */
+    xdel(args) {
+        if (args.length < 2) {
+            throw new Error("ERR wrong number of arguments for 'xdel' command");
+        }
+
+        const key = args[0];
+        const ids = args.slice(1);
+
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        const deletedCount = stream.xdel(ids);
+        
+        if (stream.isEmpty()) {
+            this.deleteKey(key);
+        }
+
+        return `(integer) ${deletedCount}`;
+    }
+
+    /**
+     * XTRIM key MAXLEN|MINID [~] count|id
+     * Trim stream to maximum length or minimum ID
+     * @param {Array<string>} args - Command arguments
+     */
+    xtrim(args) {
+        if (args.length < 3 || args.length > 4) {
+            throw new Error("ERR wrong number of arguments for 'xtrim' command");
+        }
+
+        const key = args[0];
+        const strategy = args[1].toUpperCase();
+        
+        if (strategy !== 'MAXLEN' && strategy !== 'MINID') {
+            throw new Error("ERR syntax error");
+        }
+
+        let approximate = false;
+        let valueIndex = 2;
+
+        // Check for ~ (approximate) flag
+        if (args[2] === '~') {
+            approximate = true;
+            valueIndex = 3;
+            if (args.length !== 4) {
+                throw new Error("ERR syntax error");
+            }
+        }
+
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        let removedCount = 0;
+
+        if (strategy === 'MAXLEN') {
+            const count = parseInt(args[valueIndex]);
+            if (isNaN(count) || count < 0) {
+                throw new Error("ERR value is not an integer or out of range");
+            }
+            removedCount = stream.xtrim(count, approximate);
+        } else if (strategy === 'MINID') {
+            const minId = args[valueIndex];
+            
+            // Validate ID format
+            if (!stream.isValidId(minId)) {
+                throw new Error("ERR Invalid stream ID specified");
+            }
+            
+            // Remove entries with ID smaller than minId
+            const entriesToRemove = [];
+            for (const [id, entry] of stream.entries) {
+                if (stream.compareIds(id, minId) < 0) {
+                    entriesToRemove.push(id);
+                } else {
+                    break; // Since entries are ordered, we can stop here
+                }
+            }
+            
+            removedCount = stream.xdel(entriesToRemove);
+        }
+        
+        if (stream.isEmpty()) {
+            this.deleteKey(key);
+        }
+
+        return `(integer) ${removedCount}`;
+    }
+
+    /**
+     * XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+     * Read entries from one or more streams
+     * @param {Array<string>} args - Command arguments
+     */
+    xread(args) {
+        if (args.length < 3) {
+            throw new Error("ERR wrong number of arguments for 'xread' command");
+        }
+
+        let count = -1;
+        let block = -1;
+        let streamsIndex = -1;
+
+        // Parse options
+        let i = 0;
+        while (i < args.length) {
+            const arg = args[i].toUpperCase();
+            
+            if (arg === 'COUNT') {
+                if (i + 1 >= args.length) {
+                    throw new Error("ERR syntax error");
+                }
+                count = parseInt(args[i + 1]);
+                if (isNaN(count) || count < 0) {
+                    throw new Error("ERR value is not an integer or out of range");
+                }
+                i += 2;
+            } else if (arg === 'BLOCK') {
+                if (i + 1 >= args.length) {
+                    throw new Error("ERR syntax error");
+                }
+                block = parseInt(args[i + 1]);
+                if (isNaN(block) || block < 0) {
+                    throw new Error("ERR value is not an integer or out of range");
+                }
+                i += 2;
+            } else if (arg === 'STREAMS') {
+                streamsIndex = i + 1;
+                break;
+            } else {
+                throw new Error("ERR syntax error");
+            }
+        }
+
+        if (streamsIndex === -1) {
+            throw new Error("ERR syntax error");
+        }
+
+        const streamArgs = args.slice(streamsIndex);
+        if (streamArgs.length % 2 !== 0) {
+            throw new Error("ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified");
+        }
+
+        const numStreams = streamArgs.length / 2;
+        const keys = streamArgs.slice(0, numStreams);
+        const ids = streamArgs.slice(numStreams);
+
+        const results = [];
+
+        for (let j = 0; j < numStreams; j++) {
+            const key = keys[j];
+            const startId = ids[j];
+
+            if (!this.data.has(key)) {
+                continue; // Skip non-existent streams
+            }
+
+            this.checkType(key, 'stream');
+            const stream = this.data.get(key);
+
+            let actualStartId = startId;
+            if (startId === '$') {
+                // '$' means start from next entry after last
+                const lastId = stream.getLastId();
+                if (lastId) {
+                    const parsed = stream.parseId(lastId);
+                    actualStartId = `${parsed.timestamp}-${parsed.sequence + 1}`;
+                } else {
+                    actualStartId = '0-1';
+                }
+            }
+
+            // Get entries after the specified ID
+            const entries = stream.xrange(actualStartId, '+', count);
+            
+            if (entries.length > 0) {
+                results.push([key, this.formatStreamEntries(entries)]);
+            }
+        }
+
+        // For blocking reads, we would need to implement a waiting mechanism
+        // For now, return immediate results
+        return results.length > 0 ? results : [];
+    }
+
+    /**
+     * Format stream entries for output
+     * @param {Array} entries - Array of [id, [field, value, ...]]
+     * @returns {Array} Formatted entries
+     */
+    formatStreamEntries(entries) {
+        return entries.map(([id, fields]) => [
+            `"${id}"`,
+            fields.map(field => `"${field}"`)
+        ]);
+    }
+
+    /**
+     * XGROUP subcommand ...
+     * Manage consumer groups
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroup(args) {
+        if (args.length < 1) {
+            throw new Error("ERR wrong number of arguments for 'xgroup' command");
+        }
+
+        const subcommand = args[0].toUpperCase();
+
+        switch (subcommand) {
+            case 'CREATE':
+                return this.xgroupCreate(args.slice(1));
+            case 'DESTROY':
+                return this.xgroupDestroy(args.slice(1));
+            case 'DELCONSUMER':
+                return this.xgroupDelConsumer(args.slice(1));
+            case 'SETID':
+                return this.xgroupSetId(args.slice(1));
+            case 'CREATECONSUMER':
+                return this.xgroupCreateConsumer(args.slice(1));
+            default:
+                throw new Error("ERR Unknown subcommand or wrong number of arguments for 'xgroup' command");
+        }
+    }
+
+    /**
+     * XGROUP CREATE key groupname id
+     * Create consumer group
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroupCreate(args) {
+        if (args.length !== 3) {
+            throw new Error("ERR wrong number of arguments for 'xgroup create' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+        const id = args[2];
+
+        // Create stream if it doesn't exist (for group creation)
+        if (!this.data.has(key)) {
+            const stream = new RedisStream();
+            this.setValue(key, stream, 'stream');
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        const created = stream.xgroupCreate(groupName, id);
+        
+        if (!created) {
+            throw new Error("BUSYGROUP Consumer Group name already exists");
+        }
+
+        return 'OK';
+    }
+
+    /**
+     * XGROUP DESTROY key groupname
+     * Destroy consumer group
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroupDestroy(args) {
+        if (args.length !== 2) {
+            throw new Error("ERR wrong number of arguments for 'xgroup destroy' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+
+        if (!this.data.has(key)) {
+            return '(integer) 0';
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        const destroyed = stream.xgroupDestroy(groupName);
+        return `(integer) ${destroyed ? 1 : 0}`;
+    }
+
+    /**
+     * XGROUP DELCONSUMER key groupname consumername
+     * Delete consumer from group
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroupDelConsumer(args) {
+        if (args.length !== 3) {
+            throw new Error("ERR wrong number of arguments for 'xgroup delconsumer' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+        const consumerName = args[2];
+
+        if (!this.data.has(key)) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        try {
+            const pendingCount = stream.xgroupDelConsumer(groupName, consumerName);
+            return `(integer) ${pendingCount}`;
+        } catch (error) {
+            throw new Error(error.message);
+        }
+    }
+
+    /**
+     * XGROUP SETID key groupname id
+     * Set consumer group last delivered ID
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroupSetId(args) {
+        if (args.length !== 3) {
+            throw new Error("ERR wrong number of arguments for 'xgroup setid' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+        const id = args[2];
+
+        if (!this.data.has(key)) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        try {
+            stream.xgroupSetId(groupName, id);
+            return 'OK';
+        } catch (error) {
+            throw new Error(error.message);
+        }
+    }
+
+    /**
+     * XGROUP CREATECONSUMER key groupname consumername
+     * Create consumer in group without reading
+     * @param {Array<string>} args - Command arguments
+     */
+    xgroupCreateConsumer(args) {
+        if (args.length !== 3) {
+            throw new Error("ERR wrong number of arguments for 'xgroup createconsumer' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+        const consumerName = args[2];
+
+        if (!this.data.has(key)) {
+            throw new Error("NOGROUP No such key or consumer group");
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        try {
+            const created = stream.xgroupCreateConsumer(groupName, consumerName);
+            return `(integer) ${created ? 1 : 0}`;
+        } catch (error) {
+            throw new Error(error.message);
+        }
+    }
+
+    /**
+     * Placeholder implementations for complex consumer group operations
+     * These would require more complex logic for pending entry lists
+     */
+    
+    /**
+     * XREADGROUP GROUP group consumer [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+     * Read from stream as consumer group
+     */
+    xreadgroup(args) {
+        // Simplified implementation - full implementation would require PEL management
+        throw new Error("ERR XREADGROUP not fully implemented in this demo");
+    }
+
+    /**
+     * XACK key group id [id ...]
+     * Acknowledge processed entries
+     */
+    xack(args) {
+        // Simplified implementation - full implementation would require PEL management
+        throw new Error("ERR XACK not fully implemented in this demo");
+    }
+
+    /**
+     * XPENDING key group [start end count] [consumer]
+     * Get pending entries info
+     */
+    xpending(args) {
+        // Simplified implementation - full implementation would require PEL management
+        throw new Error("ERR XPENDING not fully implemented in this demo");
+    }
+
+    /**
+     * XCLAIM key group consumer min-idle-time id [id ...] [options]
+     * Claim pending entries
+     */
+    xclaim(args) {
+        // Simplified implementation - full implementation would require PEL management
+        throw new Error("ERR XCLAIM not fully implemented in this demo");
+    }
+
+    /**
+     * XINFO subcommand key [args]
+     * Get stream information
+     */
+    xinfo(args) {
+        if (args.length < 2) {
+            throw new Error("ERR wrong number of arguments for 'xinfo' command");
+        }
+
+        const subcommand = args[0].toUpperCase();
+        const key = args[1];
+
+        if (!this.data.has(key)) {
+            throw new Error("ERR no such key");
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        switch (subcommand) {
+            case 'STREAM':
+                return [
+                    'length', `(integer) ${stream.xlen()}`,
+                    'radix-tree-keys', '(integer) 1',
+                    'radix-tree-nodes', '(integer) 2',
+                    'groups', `(integer) ${stream.consumerGroups.size}`,
+                    'last-generated-id', `"${stream.lastGeneratedId}"`,
+                    'first-entry', stream.getFirstId() ? this.formatStreamEntries([[stream.getFirstId(), []]]) : '(nil)',
+                    'last-entry', stream.getLastId() ? this.formatStreamEntries([[stream.getLastId(), []]]) : '(nil)'
+                ];
+            case 'GROUPS':
+                // Return info about consumer groups
+                return Array.from(stream.consumerGroups.entries()).map(([name, group]) => [
+                    'name', `"${name}"`,
+                    'consumers', `(integer) ${group.consumers.size}`,
+                    'pending', `(integer) ${group.pel.size}`,
+                    'last-delivered-id', `"${group.lastDeliveredId}"`
+                ]);
+            case 'CONSUMERS':
+                if (args.length !== 3) {
+                    throw new Error("ERR wrong number of arguments for 'xinfo consumers' command");
+                }
+                const groupName = args[2];
+                const group = stream.consumerGroups.get(groupName);
+                if (!group) {
+                    throw new Error("NOGROUP No such consumer group");
+                }
+                return Array.from(group.consumers.entries()).map(([name, consumer]) => [
+                    'name', `"${name}"`,
+                    'pending', `(integer) ${consumer.pending ? consumer.pending.size : 0}`,
+                    'idle', `(integer) ${Date.now() - (consumer.lastSeen || 0)}`
+                ]);
+            default:
+                throw new Error("ERR Unknown subcommand for 'xinfo' command");
+        }
+    }
+
+    /**
+     * XSETID key id
+     * Set stream last generated ID
+     * @param {Array<string>} args - Command arguments
+     */
+    xsetid(args) {
+        if (args.length !== 2) {
+            throw new Error("ERR wrong number of arguments for 'xsetid' command");
+        }
+
+        const key = args[0];
+        const id = args[1];
+
+        if (!this.data.has(key)) {
+            throw new Error("ERR no such key");
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        try {
+            stream.xsetid(id);
+            return 'OK';
+        } catch (error) {
+            throw new Error(error.message);
+        }
+    }
+
+    /**
+     * XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]
+     * Auto-claim pending entries from idle consumers
+     * @param {Array<string>} args - Command arguments
+     */
+    xautoclaim(args) {
+        if (args.length < 5) {
+            throw new Error("ERR wrong number of arguments for 'xautoclaim' command");
+        }
+
+        const key = args[0];
+        const groupName = args[1];
+        const consumerName = args[2];
+        const minIdleTime = parseInt(args[3]);
+        const start = args[4];
+
+        if (isNaN(minIdleTime) || minIdleTime < 0) {
+            throw new Error("ERR value is not an integer or out of range");
+        }
+
+        if (!this.data.has(key)) {
+            return ['0-0', []];
+        }
+
+        this.checkType(key, 'stream');
+        const stream = this.data.get(key);
+
+        // Parse options
+        let count = -1;
+        let justId = false;
+
+        for (let i = 5; i < args.length; i++) {
+            const arg = args[i].toUpperCase();
+            if (arg === 'COUNT') {
+                if (i + 1 >= args.length) {
+                    throw new Error("ERR syntax error");
+                }
+                count = parseInt(args[i + 1]);
+                if (isNaN(count) || count < 0) {
+                    throw new Error("ERR value is not an integer or out of range");
+                }
+                i++; // Skip the count value
+            } else if (arg === 'JUSTID') {
+                justId = true;
+            } else {
+                throw new Error("ERR syntax error");
+            }
+        }
+
+        try {
+            const [nextId, claimedEntries] = stream.xautoclaim(groupName, consumerName, minIdleTime, start, count);
+            
+            if (justId) {
+                // Return only the entry IDs
+                const justIds = claimedEntries.map(([id, fields]) => `"${id}"`);
+                return [nextId, justIds];
+            } else {
+                // Return full entries
+                return [nextId, this.formatStreamEntries(claimedEntries)];
+            }
+        } catch (error) {
+            throw new Error(error.message);
+        }
     }
 }
 
