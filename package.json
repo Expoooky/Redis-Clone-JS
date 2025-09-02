@@ -1,0 +1,63 @@
+{
+  "name": "redis-clone-js",
+  "version": "1.0.0",
+  "description": "A Redis-like in-memory data store implementation in JavaScript",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "benchmark": "node benchmarks/redis-comparison.js",
+    "lint": "eslint src/ tests/ cli/",
+    "lint:fix": "eslint src/ tests/ cli/ --fix"
+  },
+  "keywords": [
+    "redis",
+    "in-memory",
+    "database",
+    "key-value",
+    "data-store",
+    "cache",
+    "nosql"
+  ],
+  "author": "Assessment Project",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^9.4.1",
+    "winston": "^3.8.2"
+  },
+  "devDependencies": {
+    "jest": "^29.3.1",
+    "benchmark": "^2.1.4",
+    "eslint": "^8.30.0",
+    "eslint-config-standard": "^17.0.0",
+    "eslint-plugin-import": "^2.26.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^6.1.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/username/redis-clone-js.git"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "src/**/*.js",
+      "!src/**/*.test.js"
+    ],
+    "coverageDirectory": "coverage",
+    "coverageReporters": [
+      "text",
+      "lcov",
+      "html"
+    ],
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ]
+  }
+}

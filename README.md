@@ -1,701 +1,800 @@
-# Redis-Clone-JS
-
-A Redis-like in-memory data store implemented in JavaScript (Node.js) with comprehensive Redis command compatibility.
+# Redis-Like In-Memory Data Store - AI Development Guide
 
 ## Project Overview
 
-This project implements a Redis-compatible in-memory data store from scratch, featuring:
-- Complete CLI interface matching Redis behavior
-- In-memory key-value storage
-- Redis-compatible command set
-- Modular architecture for extensibility
-- No external dependencies for core functionality
+Build a comprehensive Redis-like in-memory data store in JavaScript that supports various data structures, persistence, replication, and advanced features. This project is designed for assessment testing with CLI interaction and should replicate Redis functionality while maintaining complete originality.
 
-## Installation & Usage
+## 🚨 CRITICAL REQUIREMENTS
 
-### Prerequisites
-- Node.js (v14+ recommended)
+- **Language**: JavaScript (Node.js)
+- **Entry Point**: Main server file acting as standalone application
+- **Originality**: NO copying from existing Redis implementations
+- **Testing**: CLI-based manual testing (no production use)
+- **Protocol**: Redis-compatible RESP (Redis Serialization Protocol)
 
-### Starting the Server
-```bash
-node server.js
+## 📁 Project Directory Structure
+
+```
+redis-clone-js/
+├── README.md
+├── package.json
+├── .gitignore
+├── server.js                     # Main application entry point
+├── src/
+│   ├── core/
+│   │   ├── DataStore.js          # Core key-value store implementation
+│   │   ├── KeyExpiration.js      # Key expiration management
+│   │   └── Database.js           # Multi-database support
+│   ├── data-structures/
+│   │   ├── StringOps.js          # String operations
+│   │   ├── JsonOps.js            # JSON document operations
+│   │   ├── ListOps.js            # List operations
+│   │   ├── SetOps.js             # Set operations
+│   │   ├── HashOps.js            # Hash operations
+│   │   ├── SortedSetOps.js       # Sorted set operations
+│   │   ├── StreamOps.js          # Stream operations
+│   │   ├── GeospatialOps.js      # Geospatial operations
+│   │   ├── BitmapOps.js          # Bitmap operations
+│   │   ├── BitfieldOps.js        # Bitfield operations
+│   │   ├── HyperLogLog.js        # HyperLogLog implementation
+│   │   ├── BloomFilter.js        # Bloom filter implementation
+│   │   └── TimeSeries.js         # Time series data structure
+│   ├── vector-db/
+│   │   ├── VectorStore.js        # Vector storage and indexing
+│   │   ├── SimilaritySearch.js   # K-NN and similarity algorithms
+│   │   └── VectorOps.js          # Vector mathematical operations
+│   ├── document-db/
+│   │   ├── DocumentStore.js      # Document storage engine
+│   │   ├── QueryEngine.js        # Document query language
+│   │   ├── IndexManager.js       # Document indexing
+│   │   └── AggregationEngine.js  # Aggregation framework
+│   ├── server/
+│   │   ├── Server.js             # Main server implementation
+│   │   ├── RESPParser.js         # RESP protocol parser
+│   │   ├── CommandRouter.js      # Command routing and execution
+│   │   ├── ClientManager.js      # Client connection management
+│   │   └── PubSub.js             # Publish/Subscribe system
+│   ├── transactions/
+│   │   ├── Transaction.js        # Transaction management
+│   │   └── MultiExec.js          # MULTI/EXEC implementation
+│   ├── persistence/
+│   │   ├── AOF.js                # Append-Only File persistence
+│   │   ├── RDB.js                # Redis Database snapshots
+│   │   └── PersistenceManager.js # Persistence coordination
+│   ├── replication/
+│   │   ├── Master.js             # Master server implementation
+│   │   ├── Slave.js              # Slave server implementation
+│   │   └── ReplicationManager.js # Replication coordination
+│   ├── security/
+│   │   ├── Authentication.js     # Auth mechanisms
+│   │   ├── ACL.js                # Access Control Lists
+│   │   └── TLS.js                # TLS/SSL support
+│   ├── scripting/
+│   │   ├── LuaEngine.js          # Lua scripting support
+│   │   └── ScriptManager.js      # Script management
+│   ├── clustering/
+│   │   ├── HashSlots.js          # Hash slot implementation
+│   │   ├── ClusterNode.js        # Cluster node management
+│   │   └── ClusterManager.js     # Cluster coordination
+│   ├── monitoring/
+│   │   ├── Info.js               # Server info and statistics
+│   │   ├── SlowLog.js            # Slow query logging
+│   │   └── Metrics.js            # Performance metrics
+│   ├── client/
+│   │   ├── RedisClient.js        # Client library implementation
+│   │   ├── Pipeline.js           # Pipelining support
+│   │   └── ClientCache.js        # Client-side caching
+│   └── utils/
+│       ├── Logger.js             # Logging utilities
+│       ├── Config.js             # Configuration management
+│       ├── Helpers.js            # Common helper functions
+│       └── Constants.js          # System constants
+├── tests/
+│   ├── unit/
+│   │   ├── data-structures/      # Unit tests for data structures
+│   │   ├── core/                 # Unit tests for core functionality
+│   │   ├── server/               # Unit tests for server components
+│   │   └── client/               # Unit tests for client library
+│   ├── integration/
+│   │   ├── server-client.test.js # Server-client integration tests
+│   │   ├── persistence.test.js   # Persistence integration tests
+│   │   └── replication.test.js   # Replication integration tests
+│   ├── performance/
+│   │   ├── benchmark.js          # Performance benchmarking
+│   │   └── stress-test.js        # Stress testing
+│   └── compatibility/
+│       └── redis-compatibility.test.js # Redis compatibility tests
+├── benchmarks/
+│   ├── data-structure-bench.js   # Data structure benchmarks
+│   ├── server-bench.js           # Server performance benchmarks
+│   └── redis-comparison.js       # Redis comparison benchmarks
+├── examples/
+│   ├── basic-usage.js            # Basic usage examples
+│   ├── advanced-features.js      # Advanced feature examples
+│   ├── vector-search.js          # Vector database examples
+│   └── document-queries.js       # Document database examples
+├── docs/
+│   ├── API.md                    # Complete API documentation
+│   ├── PROTOCOL.md               # Communication protocol spec
+│   ├── ARCHITECTURE.md           # System architecture
+│   ├── PERFORMANCE.md            # Performance analysis
+│   └── DEPLOYMENT.md             # Deployment guide
+└── cli/
+    ├── redis-cli.js              # Command-line interface
+    └── interactive-shell.js      # Interactive shell implementation
 ```
 
-This will start the interactive CLI interface where you can execute Redis-compatible commands.
+## 🏗️ DEVELOPMENT PHASES
 
-**Current Command Count**: 216 Redis-compatible commands across strings, expiration, lists, sets, hashes, sorted sets, JSON, transactions, pub/sub messaging, AOF persistence, RDB snapshots, geospatial data, bitmap/bitfield operations, and stream processing.
+### Phase 1: Foundation & Core Infrastructure (Priority: CRITICAL)
 
-## Current Implementation Status
+**Timeline**: 2-3 days
+**Dependencies**: None
 
-### Phase 1: Foundation & Basic Key-Value Store ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `SET key value` - Set key to hold string value
-- `GET key` - Get the value of key
-- `DEL key [key ...]` - Delete one or more keys
-- `EXISTS key [key ...]` - Check if one or more keys exist
-- `KEYS pattern` - Find all keys matching pattern (* for all)
-- `FLUSHALL` - Remove all keys from all databases
-- `MSET key value [key value ...]` - Set multiple keys
-- `MGET key [key ...]` - Get multiple keys
-- `GETSET key value` - Get old value and set new value
-- `SETNX key value` - Set key only if it doesn't exist
-- `GETRANGE key start end` - Get substring
-- `SETRANGE key offset value` - Set substring
-- `DBSIZE` - Get number of keys
-- `RANDOMKEY` - Get random key
-- `HELP` - Show available commands
-- `QUIT/EXIT` - Exit the server
-
-**Features**:
-- ✅ Interactive CLI with Redis-like prompt
-- ✅ Command parsing with quoted string support
-- ✅ Redis-compatible error messages
-- ✅ Pattern matching for KEYS command
-- ✅ Proper response formatting matching Redis
-
-### Phase 2: String Operations & Key Management ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `APPEND key value` - Append value to key
-- `STRLEN key` - Get the length of the value stored in key
-- `INCR key` - Increment the integer value of key by one
-- `DECR key` - Decrement the integer value of key by one
-- `INCRBY key increment` - Increment the integer value of key by increment
-- `DECRBY key decrement` - Decrement the integer value of key by decrement
-- `INCRBYFLOAT key increment` - Increment the float value of key by increment
-- `MSETNX key value [key value ...]` - Set multiple keys only if none exist
-- `GETDEL key` - Get key value and delete it atomically
-- `LCS key1 key2 [LEN] [IDX] [MINMATCHLEN len] [WITHMATCHLEN]` - Longest Common Subsequence
-- `EXPIRE key seconds` - Set timeout on key in seconds
-- `PEXPIRE key milliseconds` - Set timeout on key in milliseconds
-- `TTL key` - Get time to live for key in seconds
-- `PTTL key` - Get time to live for key in milliseconds
-- `PERSIST key` - Remove timeout from key
-- `RENAME key newkey` - Rename key to newkey
-- `RENAMENX key newkey` - Rename key only if newkey doesn't exist
-- `EXPIREAT key timestamp` - Set expiration at Unix timestamp
-- `PEXPIREAT key milliseconds-timestamp` - Set expiration at millisecond timestamp
-- `SETEX key seconds value` - Set key with expiration in seconds
-- `PSETEX key milliseconds value` - Set key with expiration in milliseconds
-- `GETEX key [options]` - Get value with expiration options
-
-**List Operations**:
-- `LPUSH key element [element ...]` - Push elements to the left (beginning) of list
-- `RPUSH key element [element ...]` - Push elements to the right (end) of list  
-- `LPOP key` - Pop element from the left (beginning) of list
-- `RPOP key` - Pop element from the right (end) of list
-- `LLEN key` - Get the length of list
-- `LRANGE key start stop` - Get range of elements from list
-- `LINDEX key index` - Get element at index from list
-- `LSET key index element` - Set element at index in list
-- `LTRIM key start stop` - Trim list to specified range
-- `LINSERT key BEFORE|AFTER pivot element` - Insert element before or after pivot
-- `LPUSHX key element [element ...]` - Push to left only if list exists
-- `RPUSHX key element [element ...]` - Push to right only if list exists
-- `LREM key count element` - Remove elements from list
-- `RPOPLPUSH source destination` - Pop from right of source and push to left of destination
-- `LMOVE source destination LEFT|RIGHT LEFT|RIGHT` - Move element between lists (any side to any side)
-- `LPOS key element [RANK rank] [COUNT num] [MAXLEN len]` - Find position of element in list
-- `LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]` - Pop elements from multiple lists
-
-**Blocking List Operations**:
-- `BLPOP key [key ...] timeout` - Blocking left pop from lists
-- `BRPOP key [key ...] timeout` - Blocking right pop from lists
-- `BRPOPLPUSH source destination timeout` - Blocking right pop and left push
-- `BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout` - Blocking move between lists
-- `BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]` - Blocking pop from multiple lists
-
-**Set Operations**:
-- `SADD key member [member ...]` - Add members to set
-- `SREM key member [member ...]` - Remove members from set
-- `SMEMBERS key` - Get all members of set
-- `SCARD key` - Get number of members in set
-- `SISMEMBER key member` - Check if member exists in set
-- `SUNION key [key ...]` - Union of sets
-- `SINTER key [key ...]` - Intersection of sets
-- `SDIFF key [key ...]` - Difference of sets (first set minus others)
-- `SPOP key [count]` - Remove and return random member(s)
-- `SRANDMEMBER key [count]` - Get random member(s) without removing
-- `SMOVE source destination member` - Move member between sets
-- `SUNIONSTORE destination key [key ...]` - Store union result in destination
-- `SINTERSTORE destination key [key ...]` - Store intersection result in destination
-- `SDIFFSTORE destination key [key ...]` - Store difference result in destination
-- `SINTERCARD numkeys key [key ...] [LIMIT limit]` - Get cardinality of intersection
-- `SMISMEMBER key member [member ...]` - Check if multiple members exist in set
-- `SSCAN key cursor [MATCH pattern] [COUNT count]` - Incrementally iterate set members
-
-**Features**:
-- ✅ String manipulation operations with proper length tracking
-- ✅ Atomic increment/decrement operations with overflow protection
-- ✅ Key expiration system with background cleanup
-- ✅ Time-to-live (TTL) functionality matching Redis behavior
-- ✅ Key persistence management
-- ✅ Key renaming with expiration preservation
-- ✅ Redis-compatible integer and error responses
-- ✅ Automatic expired key cleanup
-- ✅ **Redis 7.x SET command compatibility** with all options:
-  - `EX seconds` - Set expiration in seconds
-  - `PX milliseconds` - Set expiration in milliseconds
-  - `EXAT timestamp` - Set absolute expiration timestamp
-  - `PXAT milliseconds-timestamp` - Set absolute expiration timestamp in milliseconds
-  - `NX` - Only set if key doesn't exist
-  - `XX` - Only set if key exists
-  - `KEEPTTL` - Retain existing TTL
-  - `GET` - Return old value
-- ✅ **Millisecond precision expiration** with PEXPIRE and PTTL commands
-
-### Phase 3: List Data Structure ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `LPUSH key element [element ...]` - Push elements to the left (beginning) of list
-- `RPUSH key element [element ...]` - Push elements to the right (end) of list
-- `LPOP key` - Pop element from the left (beginning) of list
-- `RPOP key` - Pop element from the right (end) of list
-- `LLEN key` - Get the length of list
-- `LRANGE key start stop` - Get range of elements from list
-- `LINDEX key index` - Get element at index from list
-- `LSET key index element` - Set element at index in list
-- `LTRIM key start stop` - Trim list to specified range
-
-**Features**:
-- ✅ Complete list data structure with efficient operations
-- ✅ Support for negative indexing (Redis-compatible)
-- ✅ Automatic key cleanup when lists become empty
-- ✅ Full type checking and isolation between data types
-- ✅ Redis-compatible error messages and behavior
-- ✅ List expiration support with background cleanup
-- ✅ Memory-efficient operations (O(1) for push/pop at ends)
-- ✅ Range operations with proper boundary handling
-
-### Phase 4: Set Data Structure ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `SADD key member [member ...]` - Add members to set
-- `SREM key member [member ...]` - Remove members from set
-- `SMEMBERS key` - Get all members of set
-- `SCARD key` - Get number of members in set
-- `SISMEMBER key member` - Check if member exists in set
-- `SUNION key [key ...]` - Union of sets
-- `SINTER key [key ...]` - Intersection of sets
-- `SDIFF key [key ...]` - Difference of sets (first set minus others)
-- `SPOP key [count]` - Remove and return random member(s)
-- `SRANDMEMBER key [count]` - Get random member(s) without removing
-- `SMOVE source destination member` - Move member between sets
-- `SUNIONSTORE destination key [key ...]` - Store union result in destination
-- `SINTERSTORE destination key [key ...]` - Store intersection result in destination
-- `SDIFFSTORE destination key [key ...]` - Store difference result in destination
-- `SINTERCARD numkeys key [key ...] [LIMIT limit]` - Get cardinality of intersection
-- `SMISMEMBER key member [member ...]` - Check if multiple members exist in set
-- `SSCAN key cursor [MATCH pattern] [COUNT count]` - Incrementally iterate set members
-
-**Features**:
-- ✅ Complete set data structure with uniqueness guarantee
-- ✅ Efficient O(1) add/remove/membership operations using JavaScript Set
-- ✅ Full set mathematics (union, intersection, difference)
-- ✅ Automatic key cleanup when sets become empty
-- ✅ Redis-compatible behavior for non-existent keys in set operations
-- ✅ Full type checking and isolation between data types
-- ✅ Redis-compatible error messages and response formatting
-- ✅ Set expiration support with background cleanup
-
-### Phase 5: Hash Data Structure ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `HSET key field value [field value ...]` - Set field(s) in hash
-- `HGET key field` - Get field value from hash
-- `HMGET key field [field ...]` - Get multiple field values
-- `HGETALL key` - Get all field-value pairs
-- `HDEL key field [field ...]` - Delete field(s) from hash
-- `HEXISTS key field` - Check if field exists in hash
-- `HKEYS key` - Get all field names
-- `HVALS key` - Get all values
-- `HLEN key` - Get number of fields in hash
-- `HINCRBY key field increment` - Increment field by integer
-- `HINCRBYFLOAT key field increment` - Increment field by float
-- `HSETNX key field value` - Set field only if it doesn't exist
-- `HMSET key field value [field value ...]` - Set multiple fields (legacy)
-- `HSTRLEN key field` - Get length of field value
-- `HSCAN key cursor [MATCH pattern] [COUNT count]` - Incrementally iterate hash fields
-- `HRANDFIELD key [count [WITHVALUES]]` - Get random field(s) from hash
-
-**Hash Field Expiration (Redis 7.2+)**:
-- `HGETDEL key field` - Get field value and delete it atomically
-- `HEXPIRE key seconds field [field ...]` - Set field expiration in seconds
-- `HEXPIREAT key timestamp field [field ...]` - Set field expiration at Unix timestamp
-- `HEXPIRETIME key field [field ...]` - Get field expiration timestamp
-- `HPEXPIRE key milliseconds field [field ...]` - Set field expiration in milliseconds
-- `HPEXPIREAT key milliseconds-timestamp field [field ...]` - Set field expiration at millisecond timestamp
-- `HPEXPIRETIME key field [field ...]` - Get field expiration timestamp in milliseconds
-- `HTTL key field [field ...]` - Get field time to live in seconds
-- `HPTTL key field [field ...]` - Get field time to live in milliseconds
-- `HPERSIST key field [field ...]` - Remove field expiration
-
-**Features**:
-- ✅ Complete hash data structure with field-value mapping
-- ✅ Efficient O(1) field operations using JavaScript Map
-- ✅ Support for multiple field operations in single command (HSET, HMGET, HDEL)
-- ✅ Numeric operations with integer and float arithmetic
-- ✅ Conditional field setting (HSETNX)
-- ✅ Bulk inspection operations (HKEYS, HVALS, HGETALL)
-- ✅ Advanced hash operations (HRANDFIELD, HSTRLEN, HSCAN)
-- ✅ **Field-level expiration support (Redis 7.2+ feature)**
-- ✅ Atomic get-and-delete operations (HGETDEL)
-- ✅ Field TTL management with second and millisecond precision
-- ✅ Automatic expired field cleanup with lazy expiration checking
-- ✅ Automatic key cleanup when hashes become empty
-- ✅ Full type checking and isolation between data types
-- ✅ Redis-compatible error messages and response formatting
-- ✅ Hash expiration support with background cleanup
-
-### Phase 6: Sorted Set Data Structure ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `ZADD key score member [score member ...]` - Add members with scores to sorted set
-- `ZREM key member [member ...]` - Remove members from sorted set
-- `ZSCORE key member` - Get score of member
-- `ZRANK key member` - Get rank (0-based index) of member
-- `ZREVRANK key member` - Get reverse rank of member
-- `ZRANGE key start stop [WITHSCORES]` - Get range of members by rank
-- `ZREVRANGE key start stop [WITHSCORES]` - Get range of members by rank (reverse)
-- `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]` - Get range by score
-- `ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]` - Get range by score (reverse)
-- `ZCOUNT key min max` - Count members in score range
-- `ZCARD key` - Get number of members in sorted set
-- `ZINCRBY key increment member` - Increment score of member
-- `ZREMRANGEBYRANK key start stop` - Remove members by rank range
-- `ZREMRANGEBYSCORE key min max` - Remove members by score range
-- `ZRANGEBYLEX key min max [LIMIT offset count]` - Get range by lexicographical order
-- `ZREVRANGEBYLEX key max min [LIMIT offset count]` - Get range by lexicographical order (reverse)
-- `ZLEXCOUNT key min max` - Count members in lexicographical range
-- `ZREMRANGEBYLEX key min max` - Remove members by lexicographical range
-
-**Advanced Sorted Set Operations**:
-- `ZPOPMIN key [count]` - Pop minimum scored members
-- `ZPOPMAX key [count]` - Pop maximum scored members  
-- `ZMSCORE key member [member ...]` - Get scores for multiple members
-- `ZRANDMEMBER key [count [WITHSCORES]]` - Get random member(s) from sorted set
-- `ZSCAN key cursor [MATCH pattern] [COUNT count]` - Incrementally iterate sorted set
-- `ZUNION numkeys key [key ...]` - Union of multiple sorted sets (without storing)
-- `ZUNIONSTORE destination numkeys key [key ...]` - Store union of multiple sorted sets
-- `ZINTER numkeys key [key ...]` - Intersection of multiple sorted sets (without storing)
-- `ZINTERSTORE destination numkeys key [key ...]` - Store intersection of multiple sorted sets
-- `ZDIFF numkeys key [key ...]` - Difference of multiple sorted sets (without storing)
-- `ZDIFFSTORE destination numkeys key [key ...]` - Store difference of multiple sorted sets
-- `ZINTERCARD numkeys key [key ...] [LIMIT limit]` - Get cardinality of intersection
-- `ZMPOP numkeys key [key ...] MIN|MAX [COUNT count]` - Pop members from multiple sorted sets
-- `ZRANGESTORE destination source start stop` - Store range results in destination key
-
-**Blocking Sorted Set Operations**:
-- `BZPOPMIN key [key ...] timeout` - Blocking pop minimum scored members
-- `BZPOPMAX key [key ...] timeout` - Blocking pop maximum scored members
-- `BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]` - Blocking pop from multiple sorted sets
-
-**Features**:
-- ✅ Complete sorted set data structure with score-based ordering
-- ✅ Efficient operations using binary search for insertion and removal
-- ✅ Support for both rank-based and score-based range queries
-- ✅ Lexicographic ordering for members with equal scores
-- ✅ Floating-point score precision with proper arithmetic operations
-- ✅ Advanced range operations with LIMIT support for pagination
-- ✅ Score increment operations with automatic re-positioning
-- ✅ Bulk removal operations by rank and score ranges
-- ✅ **Advanced pop operations (ZPOPMIN, ZPOPMAX, ZMPOP)**
-- ✅ **Multi-set operations (ZUNION, ZINTER, ZDIFF with STORE variants)**
-- ✅ **Random member selection (ZRANDMEMBER with WITHSCORES)**
-- ✅ **Cursor-based iteration (ZSCAN with MATCH and COUNT)**
-- ✅ **Multi-member score retrieval (ZMSCORE)**
-- ✅ **Set intersection cardinality (ZINTERCARD with LIMIT)**
-- ✅ **Range storage operations (ZRANGESTORE)**
-- ✅ **Blocking operations (BZPOPMIN, BZPOPMAX, BZMPOP)**
-- ✅ Automatic key cleanup when sorted sets become empty
-- ✅ Full type checking and isolation between data types
-- ✅ Redis-compatible error messages and response formatting
-- ✅ Sorted set expiration support with background cleanup
-- ✅ O(log n) insertion and removal maintaining sorted order
-- ✅ Lexicographical range operations for members with equal scores
-- ✅ Support for Redis-style lexicographical bounds ([, (, -, +)
-
-### Phase 7: JSON Data Structure ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `JSON.GET key [path] [INDENT] [NEWLINE] [SPACE]` - Get JSON value at path
-- `JSON.SET key path value [NX|XX]` - Set JSON value at path
-- `JSON.DEL key [path]` - Delete JSON value at path
-- `JSON.TYPE key [path]` - Get JSON type at path
-- `JSON.STRLEN key [path]` - Get string length at path
-- `JSON.MGET key [key ...] path` - Get JSON values from multiple keys at path
-
-**JSON Array Operations**:
-- `JSON.ARRAPPEND key path value [value ...]` - Append values to JSON array
-- `JSON.ARRLEN key [path]` - Get JSON array length
-- `JSON.ARRINDEX key path value [start [stop]]` - Find index of value in array
-- `JSON.ARRINSERT key path index value [value ...]` - Insert values into array
-- `JSON.ARRPOP key path [index]` - Pop value from JSON array
-- `JSON.ARRTRIM key path start stop` - Trim JSON array to range
-
-**JSON Object Operations**:
-- `JSON.OBJKEYS key [path]` - Get JSON object keys
-- `JSON.OBJLEN key [path]` - Get JSON object length
-
-**JSON Numeric Operations**:
-- `JSON.NUMINCRBY key path value` - Increment number at JSON path
-- `JSON.NUMMULTBY key path value` - Multiply number at JSON path
-
-**JSON Utility Operations**:
-- `JSON.CLEAR key [path]` - Clear JSON value at path
-- `JSON.FORGET key [path]` - Alias for JSON.DEL
-- `JSON.RESP key [path]` - Get JSON value in RESP format
-- `JSON.DEBUG subcommand [key] [path]` - Debug JSON operations
-- `JSON.MSET key path value [key path value ...]` - Set multiple JSON keys
-- `JSON.MERGE key path value` - Merge JSON value into existing paths
-- `JSON.STRAPPEND key path value` - Append to string at JSON path
-- `JSON.TOGGLE key path` - Toggle boolean value at JSON path
-
-**Features**:
-- ✅ Complete JSON data type with native storage and manipulation
-- ✅ **JSONPath support** for nested object and array access
-- ✅ **Path-based operations** with dot notation and array indexing
-- ✅ **Type-safe operations** with comprehensive type checking
-- ✅ **Array manipulation** (append, insert, pop, trim, search)
-- ✅ **Object manipulation** (keys, length, nested access)
-- ✅ **Numeric operations** with float arithmetic support
-- ✅ **Conditional operations** (NX, XX options)
-- ✅ **Advanced formatting** (INDENT, NEWLINE, SPACE options)
-- ✅ **Multi-key operations** (JSON.MGET for bulk retrieval)
-- ✅ **Debug utilities** (memory usage, RESP format conversion)
-- ✅ **Automatic type detection** and validation
-- ✅ **Redis-compatible error messages** and response formatting
-- ✅ **Memory-efficient JSON storage** with lazy evaluation
-- ✅ Full type checking and isolation between data types
-
-### Phase 8: Transaction Support ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `MULTI` - Start a transaction block
-- `EXEC` - Execute all commands in the transaction atomically
-- `DISCARD` - Discard/cancel the current transaction
-- `WATCH key [key ...]` - Watch keys for changes (optimistic locking)
-- `UNWATCH` - Stop watching all keys
-
-**Features**:
-- ✅ **Atomic transactions** with MULTI/EXEC for all-or-nothing command execution
-- ✅ **Transaction queueing** with "QUEUED" responses during MULTI block
-- ✅ **Transaction cancellation** with DISCARD command
-- ✅ **Optimistic locking** with WATCH/UNWATCH for concurrency control
-- ✅ **Multi-data-type support** works with all 7 data structures (strings, lists, sets, hashes, sorted sets, JSON)
-- ✅ **Comprehensive error handling** (EXEC without MULTI, nested MULTI, WATCH inside MULTI)
-- ✅ **Redis-compatible behavior** including transaction state management
-- ✅ **Enterprise-grade reliability** for banking, inventory, and critical applications
-- ✅ **Full ACID compliance** with atomicity, consistency, isolation, durability
-- ✅ **Performance optimization** with reduced network roundtrips
-- ✅ **Watched key change detection** for preventing race conditions
-- ✅ **Transaction rollback** on watched key modifications
-
-### Phase 9: Pub/Sub Mechanism ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `PUBLISH channel message` - Publish message to a channel
-- `SUBSCRIBE channel [channel ...]` - Subscribe to one or more channels
-- `UNSUBSCRIBE [channel ...]` - Unsubscribe from channels (all if no args)
-- `PSUBSCRIBE pattern [pattern ...]` - Subscribe to channel patterns using wildcards
-- `PUNSUBSCRIBE [pattern ...]` - Unsubscribe from patterns (all if no args)
-- `PUBSUB CHANNELS [pattern]` - List active channels matching pattern
-- `PUBSUB NUMSUB channel [channel ...]` - Get subscriber count for channels
-- `PUBSUB NUMPAT` - Get number of active pattern subscriptions
-
-**Features**:
-- ✅ **Real-time message delivery** with instant broadcasting to all subscribers
-- ✅ **Channel subscriptions** for direct topic-based messaging
-- ✅ **Pattern subscriptions** with full glob-style wildcard support (* and ?)
-- ✅ **Subscribe mode restrictions** preventing non-pub/sub commands during subscription
-- ✅ **Message formatting** with exact Redis wire protocol compatibility
-- ✅ **Multiple subscription types** supporting both channels and patterns simultaneously
-- ✅ **Subscription management** with granular subscribe/unsubscribe control
-- ✅ **Introspection commands** for monitoring pub/sub state and activity
-- ✅ **Pattern matching engine** with regex-based glob pattern evaluation
-- ✅ **Subscriber counting** with accurate tracking of channel and pattern subscribers
-- ✅ **Message delivery confirmation** with subscriber count returns from PUBLISH
-- ✅ **Enterprise messaging support** for real-time notifications, chat systems, and event-driven architectures
-- ✅ **Full Redis compatibility** including error handling and response formatting
-- ✅ **Performance optimization** with efficient pattern matching and subscription management
-
-### Phase 10: AOF (Append Only File) Persistence ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `BGREWRITEAOF` - Rewrite AOF file in background for compaction
-
-**Features**:
-- ✅ **AOF file logging** for all write operations with JSON format storage
-- ✅ **Data recovery on startup** by replaying AOF commands to restore state
-- ✅ **Multiple sync policies** supporting 'always', 'everysec', and 'no' synchronization
-- ✅ **BGREWRITEAOF command** for background file compaction and optimization
-- ✅ **All data structure support** including strings, lists, sets, hashes, sorted sets, and JSON
-- ✅ **Expiration persistence** for both key-level and hash field-level TTLs
-- ✅ **Graceful shutdown** with automatic AOF synchronization on exit
-- ✅ **Error handling and backup** mechanisms for safe AOF operations
-- ✅ **Command-line and environment configuration** for AOF settings (--aof flag, AOF_ENABLED, AOF_FILENAME, AOF_SYNC_POLICY)
-- ✅ **Background sync timer** for 'everysec' policy with automatic buffer management
-- ✅ **Transaction support** with proper AOF logging of executed transaction commands
-- ✅ **Memory-efficient buffering** with configurable flush strategies
-- ✅ **Enterprise-grade reliability** ensuring data durability across server restarts
-- ✅ **Full Redis compatibility** matching Redis AOF behavior and file format
-- ✅ **Performance optimization** with efficient command serialization and minimal I/O overhead
-
-### Phase 11: RDB (Redis Database) Snapshots ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `SAVE` - Save dataset to RDB snapshot synchronously
-- `BGSAVE` - Save dataset to RDB snapshot in background  
-- `LASTSAVE` - Get timestamp of last successful RDB save
-
-**Features**:
-- ✅ **Point-in-time snapshots** with complete dataset preservation in JSON format
-- ✅ **Manual snapshot creation** with SAVE command for synchronous snapshots
-- ✅ **Background snapshot creation** with BGSAVE command for non-blocking saves
-- ✅ **Automatic snapshots** based on configurable time intervals and change thresholds
-- ✅ **Data recovery on startup** by loading RDB snapshots when AOF is not available
-- ✅ **All data structure support** including strings, lists, sets, hashes, sorted sets, and JSON
-- ✅ **Expiration persistence** for both key-level and hash field-level TTLs
-- ✅ **Timestamp tracking** with LASTSAVE command for monitoring backup status
-- ✅ **Backup and safety mechanisms** with automatic backup file creation and cleanup
-- ✅ **Configurable auto-save policies** via environment variables (RDB_SAVE_SECONDS, RDB_SAVE_CHANGES)
-- ✅ **Graceful shutdown snapshots** saving unsaved changes on server exit
-- ✅ **Memory-efficient serialization** with structured JSON format for reliability
-- ✅ **Error handling and validation** ensuring data integrity and proper error reporting
-- ✅ **Command-line and environment configuration** for flexible deployment options
-- ✅ **Enterprise-grade reliability** with backup rotation and corruption prevention
-- ✅ **Performance optimization** with efficient serialization and background processing
-
-### Phase 12: Geospatial Data ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `GEOADD key longitude latitude member [longitude latitude member ...]` - Add geospatial items to geo index
-- `GEODIST key member1 member2 [unit]` - Get distance between two geospatial members
-- `GEOPOS key member [member ...]` - Get positions (longitude, latitude) of members
-- `GEOHASH key member [member ...]` - Get geohash strings for members
-- `GEORADIUS key longitude latitude radius unit [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC]` - Search for members within radius from coordinates
-- `GEORADIUSBYMEMBER key member radius unit [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count] [ASC|DESC]` - Search for members within radius from another member
-- `GEOSEARCH key FROMMEMBER member|FROMLONLAT lon lat BYRADIUS radius unit|BYBOX width height unit [options]` - Modern geospatial search (Redis 6.2+)
-- `GEOSEARCHSTORE destination source FROMMEMBER member|FROMLONLAT lon lat BYRADIUS radius unit|BYBOX width height unit [options]` - Store geosearch results in destination key
-
-**Features**:
-- ✅ **Complete geospatial indexing** using geohash encoding for efficient spatial queries
-- ✅ **Haversine distance calculation** providing accurate great-circle distances between coordinates
-- ✅ **Multiple distance units** supporting meters (m), kilometers (km), miles (mi), and feet (ft)
-- ✅ **Coordinate validation** ensuring longitude/latitude values are within valid geographic ranges
-- ✅ **Proximity searches** with GEORADIUS for radius-based location queries from any coordinates
-- ✅ **Member-based searches** with GEORADIUSBYMEMBER for finding locations near existing members
-- ✅ **Advanced search options** including WITHCOORD, WITHDIST, WITHHASH for enriched results
-- ✅ **Result sorting and limiting** with ASC/DESC ordering and COUNT constraints
-- ✅ **Modern GEOSEARCH syntax** providing flexible query options with FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX
-- ✅ **Search result storage** with GEOSEARCHSTORE for saving query results as new geo indexes
-- ✅ **Type safety and isolation** ensuring geospatial keys are separate from other data types
-- ✅ **Redis compatibility** matching exact Redis geospatial command behavior and response formats
-- ✅ **RDB persistence integration** enabling geospatial data to be saved and restored in snapshots
-- ✅ **Error handling** with comprehensive validation and Redis-compatible error messages
-- ✅ **Performance optimization** using efficient algorithms for spatial indexing and distance calculations
-
-### Phase 13: Bitmaps & Bitfields ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `SETBIT key offset value` - Set bit at specified offset to value (0 or 1)
-- `GETBIT key offset` - Get bit value at specified offset
-- `BITCOUNT key [start end]` - Count number of set bits in range
-- `BITPOS key bit [start [end]]` - Find first bit set to specified value
-- `BITOP operation destkey key [key ...]` - Perform bitwise operation (AND, OR, XOR, NOT)
-- `BITFIELD key [GET type offset] [SET type offset value] [INCRBY type offset increment] [OVERFLOW WRAP|SAT|FAIL]` - Advanced bitfield operations
-- `BITFIELD_RO key [GET type offset] [GET type offset ...]` - Read-only bitfield operations (Redis 6.0+)
-
-**Features**:
-- ✅ **Efficient bit storage** using Node.js Buffer for memory-optimized binary data storage
-- ✅ **Individual bit operations** with SETBIT/GETBIT for precise bit manipulation at any offset
-- ✅ **Bit counting and searching** with BITCOUNT for population count and BITPOS for bit position finding
-- ✅ **Bitwise operations** supporting AND, OR, XOR, NOT operations between multiple bitmaps
-- ✅ **Advanced bitfield operations** with support for signed/unsigned integers of 1-64 bits
-- ✅ **Multiple integer types** supporting u1-u64 (unsigned) and i1-i64 (signed) data types
-- ✅ **Overflow handling** with WRAP (default), SAT (saturate), and FAIL behaviors for arithmetic operations
-- ✅ **Type-based offsets** with #n syntax for automatic offset calculation based on field width
-- ✅ **Complex operations** allowing multiple GET/SET/INCRBY operations in single BITFIELD command
-- ✅ **Range operations** with byte-level start/end parameters for BITCOUNT and BITPOS
-- ✅ **Big-endian bit ordering** matching Redis's bit layout and indexing scheme
-- ✅ **Automatic buffer expansion** dynamically growing storage as needed for large bit offsets
-- ✅ **Type safety and isolation** ensuring bitmap keys are separate from other data types
-- ✅ **RDB persistence integration** enabling bitmap data to be saved and restored in snapshots
-- ✅ **Redis compatibility** matching exact Redis bitmap and bitfield command behavior and response formats
-- ✅ **Error handling** with comprehensive validation and Redis-compatible error messages
-- ✅ **Performance optimization** using efficient bit manipulation algorithms and memory management
-
-### Phase 14: Streams ✅
-**Status**: Complete
-
-**Implemented Commands**:
-- `XADD key id field value [field value ...]` - Add entry to stream with auto-generated or explicit ID
-- `XLEN key` - Get number of entries in stream
-- `XRANGE key start end [COUNT count]` - Get range of entries from stream (forward)
-- `XREVRANGE key end start [COUNT count]` - Get range of entries from stream (reverse)
-- `XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]` - Read entries from one or more streams
-- `XTRIM key MAXLEN|MINID [~] count|id` - Trim stream to maximum length or minimum ID
-- `XDEL key id [id ...]` - Delete entries from stream
-- `XSETID key id` - Set stream last generated ID
-- `XGROUP CREATE key groupname id` - Create consumer group for distributed processing
-- `XGROUP DESTROY key groupname` - Destroy consumer group
-- `XGROUP SETID key groupname id` - Set consumer group last delivered ID
-- `XGROUP CREATECONSUMER key groupname consumername` - Create consumer in group without reading
-- `XGROUP DELCONSUMER key groupname consumername` - Delete consumer from group
-- `XAUTOCLAIM key group consumer min-idle-time start [COUNT count] [JUSTID]` - Auto-claim pending entries from idle consumers
-- `XINFO STREAM key` - Get detailed stream information
-- `XINFO GROUPS key` - Get consumer groups information
-- `XINFO CONSUMERS key group` - Get consumers information for a group
-
-**Advanced Commands (Placeholder)**:
-- `XREADGROUP GROUP group consumer [options] STREAMS key [key ...] id [id ...]` - Read from stream as consumer group
-- `XACK key group id [id ...]` - Acknowledge processed entries
-- `XPENDING key group [start end count] [consumer]` - Get pending entries information
-- `XCLAIM key group consumer min-idle-time id [id ...] [options]` - Claim pending entries
-
-**Features**:
-- ✅ **Time-ordered data records** with unique timestamp-sequence IDs (e.g., "1609459200000-0")
-- ✅ **Auto-generated IDs** using current timestamp or explicit ID specification with validation
-- ✅ **Stream entries** storing field-value pairs with efficient access and retrieval
-- ✅ **Range queries** supporting forward (XRANGE) and reverse (XREVRANGE) iteration
-- ✅ **Stream management** with trimming (XTRIM) and deletion (XDEL) operations
-- ✅ **Multi-stream reading** with XREAD supporting multiple streams and filtering
-- ✅ **Consumer groups** for distributed stream processing and load balancing
-- ✅ **Stream introspection** with XINFO commands for monitoring and debugging
-- ✅ **ID validation and ordering** ensuring chronological consistency and duplicate prevention
-- ✅ **Memory-efficient storage** using JavaScript Map for optimal performance
-- ✅ **COUNT and BLOCK options** for pagination and non-blocking/blocking reads
-- ✅ **Approximate trimming** with ~ flag for performance optimization
-- ✅ **Consumer group management** with creation, destruction, and member operations
-- ✅ **Stream metadata tracking** including last generated ID, length, and group information
-- ✅ **Type safety and isolation** ensuring stream keys are separate from other data types
-- ✅ **RDB persistence integration** enabling stream data to be saved and restored in snapshots
-- ✅ **Redis compatibility** matching Redis stream command behavior and response formats
-- ✅ **Error handling** with comprehensive validation and Redis-compatible error messages
-- ✅ **Performance optimization** using efficient algorithms for time-ordered data management
-
-## Example Usage
-
+#### 1.1 Project Setup
 ```bash
-$ node server.js
-Redis-Clone Server started. Type "help" for available commands.
-Use QUIT or Ctrl+C to exit.
-
-redis-clone> SET name "John Doe"
-OK
-redis-clone> GET name
-"John Doe"
-redis-clone> SET age 30
-OK
-redis-clone> EXISTS name age
-(integer) 2
-redis-clone> KEYS *
-1) "name"
-2) "age"
-redis-clone> DEL age
-(integer) 1
-redis-clone> GET age
-(nil)
-redis-clone> HELP
-Available commands:
-
-=== Basic Key-Value Operations ===
-SET key value                 - Set key to hold string value
-GET key                      - Get the value of key
-DEL key [key ...]           - Delete one or more keys
-EXISTS key [key ...]        - Check if one or more keys exist
-KEYS pattern                - Find all keys matching pattern (* for all)
-FLUSHALL                    - Remove all keys from all databases
-
-=== String Operations ===
-APPEND key value             - Append value to key
-STRLEN key                   - Get the length of the value stored in key
-
-=== Atomic Operations ===
-INCR key                     - Increment the integer value of key by one
-DECR key                     - Decrement the integer value of key by one
-INCRBY key increment         - Increment the integer value of key by increment
-DECRBY key decrement         - Decrement the integer value of key by decrement
-
-=== Key Expiration ===
-EXPIRE key seconds           - Set timeout on key in seconds
-TTL key                      - Get time to live for key in seconds
-PERSIST key                  - Remove timeout from key
-
-=== Key Management ===
-RENAME key newkey            - Rename key to newkey
-
-=== System ===
-HELP                        - Show this help message
-QUIT/EXIT                   - Exit the server
+# Initialize the project structure
+- Create package.json with required dependencies
+- Set up .gitignore for Node.js projects
+- Create basic directory structure
+- Initialize logging system
 ```
 
-## Architecture
+#### 1.2 Core Data Store Implementation
+**Files to create**:
+- `src/core/DataStore.js` - Main hash table implementation
+- `src/core/KeyExpiration.js` - TTL and expiration management
+- `src/utils/Logger.js` - Logging utilities
+- `src/utils/Config.js` - Configuration management
 
-### Core Components
+**Required functionality**:
+- Hash table with O(1) average access time
+- Basic operations: SET, GET, DEL, EXISTS
+- Memory-efficient key storage
+- Thread-safe operations preparation
 
-1. **RedisClone Class** (`server.js`)
-   - Main server class managing the data store
-   - CLI interface and command processing
-   - In-memory storage using JavaScript Map
+#### 1.3 Basic String Operations
+**Files to create**:
+- `src/data-structures/StringOps.js`
 
-2. **Command Parser**
-   - Handles quoted strings and complex command parsing
-   - Redis-compatible argument processing
+**Commands to implement**:
+- GET, SET, APPEND, STRLEN
+- INCR, DECR, INCRBY, DECRBY
+- GETRANGE, SETRANGE
 
-3. **Storage Engine**
-   - Simple Map-based key-value storage
-   - Ready for extension to support complex data types
+#### 1.4 Server Foundation
+**Files to create**:
+- `server.js` - Main application entry point
+- `src/server/Server.js` - Basic TCP server
+- `src/server/RESPParser.js` - Basic RESP protocol parser
 
-## Development Phases
+**Acceptance Criteria**:
+- Server starts and listens on configurable port
+- Basic telnet connection works
+- SET/GET commands work via telnet
+- Proper error handling and responses
 
-This project follows an 19-phase development plan:
+### Phase 2: Essential Data Structures (Priority: HIGH)
 
-- ✅ **Phase 1**: Foundation & Basic Key-Value Store
-- ✅ **Phase 2**: String Operations & Key Management
-- ✅ **Phase 3**: List Data Structure
-- ✅ **Phase 4**: Set Data Structure
-- ✅ **Phase 5**: Hash Data Structure
-- ✅ **Phase 6**: Sorted Sets
-- ✅ **Phase 7**: JSON Support
-- ✅ **Phase 8**: Transaction Support
-- ✅ **Phase 9**: Pub/Sub Mechanism
-- ✅ **Phase 10**: Persistence - AOF
-- ✅ **Phase 11**: Persistence - RDB Snapshots
-- ✅ **Phase 12**: Geospatial Data
-- ✅ **Phase 13**: Bitmaps & Bitfields
-- ✅ **Phase 14**: Streams
-- ⏳ **Phase 15**: Vector Database
-- ⏳ **Phase 16**: Document Database
-- ⏳ **Phase 17**: Probabilistic Data Structures
-- ⏳ **Phase 18**: Time Series Support
+**Timeline**: 3-4 days
+**Dependencies**: Phase 1 complete
 
-## Contributing
+#### 2.1 List Implementation
+**Files to create**:
+- `src/data-structures/ListOps.js`
 
-Each phase builds upon the previous ones without breaking existing functionality. The codebase maintains Redis compatibility while being built from scratch in JavaScript.
+**Commands to implement**:
+- LPUSH, RPUSH, LPOP, RPOP
+- LRANGE, LINDEX, LSET, LLEN
+- LTRIM, LINSERT, LREM
 
-## Testing
+#### 2.2 Set Implementation
+**Files to create**:
+- `src/data-structures/SetOps.js`
 
-To test the current implementation:
+**Commands to implement**:
+- SADD, SREM, SISMEMBER, SMEMBERS
+- SINTER, SUNION, SDIFF
+- SCARD, SRANDMEMBER
 
-1. Start the server: `node server.js`
-2. Test basic commands as shown in the example usage
-3. Verify Redis-compatible responses and error handling
+#### 2.3 Hash Implementation
+**Files to create**:
+- `src/data-structures/HashOps.js`
 
-## License
+**Commands to implement**:
+- HSET, HGET, HMSET, HGETALL
+- HDEL, HEXISTS, HKEYS, HVALS
+- HINCRBY, HLEN
 
-This project is for educational purposes, implementing Redis-like functionality from scratch.
+#### 2.4 Command Router Enhancement
+**Files to enhance**:
+- `src/server/CommandRouter.js` - Route commands to appropriate handlers
+
+**Acceptance Criteria**:
+- All list, set, and hash operations work correctly
+- Memory usage is optimized
+- Error handling for invalid operations
+- Type checking and validation
+
+### Phase 3: Advanced Data Structures (Priority: HIGH)
+
+**Timeline**: 4-5 days
+**Dependencies**: Phase 2 complete
+
+#### 3.1 Sorted Sets Implementation
+**Files to create**:
+- `src/data-structures/SortedSetOps.js`
+
+**Commands to implement**:
+- ZADD, ZREM, ZRANGE, ZRANGEBYSCORE
+- ZRANK, ZREVRANK, ZSCORE, ZCARD
+- ZINCRBY, ZREMRANGEBYRANK, ZREMRANGEBYSCORE
+
+**Technical Requirements**:
+- Use balanced tree or skip list for O(log n) operations
+- Support for lexicographical ordering
+- Efficient range queries
+
+#### 3.2 JSON Document Support
+**Files to create**:
+- `src/data-structures/JsonOps.js`
+
+**Commands to implement**:
+- JSON.SET, JSON.GET, JSON.DEL
+- JSON.ARRAPPEND, JSON.ARRLEN, JSON.ARRPOP
+- JSON.OBJKEYS, JSON.OBJLEN
+- JSONPath-like queries
+
+#### 3.3 Stream Implementation
+**Files to create**:
+- `src/data-structures/StreamOps.js`
+
+**Commands to implement**:
+- XADD, XREAD, XRANGE, XLEN
+- XGROUP CREATE, XREADGROUP, XACK
+- XPENDING, XCLAIM
+
+**Technical Requirements**:
+- Append-only log structure
+- Consumer group management
+- Message acknowledgment system
+
+### Phase 4: Specialized Data Structures (Priority: MEDIUM)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 3 complete
+
+#### 4.1 Geospatial Operations
+**Files to create**:
+- `src/data-structures/GeospatialOps.js`
+
+**Commands to implement**:
+- GEOADD, GEODIST, GEOHASH
+- GEOPOS, GEORADIUS, GEORADIUSBYMEMBER
+- GEOSEARCH (Redis 6.2+ style)
+
+**Technical Requirements**:
+- Implement Geohash algorithm
+- Efficient spatial indexing
+- Distance calculations (haversine formula)
+
+#### 4.2 Bitmap Operations
+**Files to create**:
+- `src/data-structures/BitmapOps.js`
+
+**Commands to implement**:
+- SETBIT, GETBIT, BITCOUNT
+- BITOP (AND, OR, XOR, NOT)
+- BITPOS, BITFIELD
+
+#### 4.3 Bitfield Operations
+**Files to create**:
+- `src/data-structures/BitfieldOps.js`
+
+**Commands to implement**:
+- BITFIELD GET, BITFIELD SET
+- BITFIELD INCRBY
+- Support for signed/unsigned integers of various sizes
+
+#### 4.4 Probabilistic Data Structures
+**Files to create**:
+- `src/data-structures/HyperLogLog.js`
+- `src/data-structures/BloomFilter.js`
+
+**Commands to implement**:
+- PFADD, PFCOUNT, PFMERGE (HyperLogLog)
+- Custom Bloom filter commands
+
+### Phase 5: Time Series & Vector Database (Priority: MEDIUM)
+
+**Timeline**: 4-5 days
+**Dependencies**: Phase 4 complete
+
+#### 5.1 Time Series Implementation
+**Files to create**:
+- `src/data-structures/TimeSeries.js`
+
+**Commands to implement**:
+- TS.CREATE, TS.ADD, TS.RANGE, TS.GET
+- TS.MGET, TS.MRANGE
+- Downsampling and aggregation functions
+
+#### 5.2 Vector Database Foundation
+**Files to create**:
+- `src/vector-db/VectorStore.js`
+- `src/vector-db/SimilaritySearch.js`
+- `src/vector-db/VectorOps.js`
+
+**Features to implement**:
+- Vector storage and indexing (HNSW algorithm)
+- K-nearest neighbor search
+- Cosine similarity, Euclidean distance
+- Vector addition, subtraction, dot product
+- Integration interfaces for ML libraries
+
+### Phase 6: Document Database Capabilities (Priority: MEDIUM)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 3 complete (JSON support)
+
+#### 6.1 Document Storage Engine
+**Files to create**:
+- `src/document-db/DocumentStore.js`
+- `src/document-db/IndexManager.js`
+
+**Features to implement**:
+- Flexible JSON document storage
+- Secondary indexing for efficient retrieval
+- Partial updates and nested field access
+
+#### 6.2 Query Engine
+**Files to create**:
+- `src/document-db/QueryEngine.js`
+- `src/document-db/AggregationEngine.js`
+
+**Features to implement**:
+- Simple query language for documents
+- Aggregation framework (count, sum, average, group by)
+- Array operations and filtering
+
+### Phase 7: Key Management & Expiration (Priority: HIGH)
+
+**Timeline**: 2-3 days
+**Dependencies**: Phase 1 complete
+
+#### 7.1 Enhanced Key Expiration
+**Files to enhance**:
+- `src/core/KeyExpiration.js`
+
+**Commands to implement**:
+- EXPIRE, EXPIREAT, TTL, PTTL
+- PERSIST, PEXPIRE, PEXPIREAT
+- Background expiration cleanup
+
+#### 7.2 Keyspace Management
+**Files to create**:
+- `src/core/Database.js`
+
+**Commands to implement**:
+- SELECT (database selection)
+- FLUSHDB, FLUSHALL
+- RANDOMKEY, KEYS (with pattern matching)
+- SCAN (cursor-based iteration)
+
+### Phase 8: Transactions & Pub/Sub (Priority: HIGH)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 2 complete
+
+#### 8.1 Transaction System
+**Files to create**:
+- `src/transactions/Transaction.js`
+- `src/transactions/MultiExec.js`
+
+**Commands to implement**:
+- MULTI, EXEC, DISCARD
+- WATCH, UNWATCH (optimistic locking)
+- Command queuing and atomic execution
+
+#### 8.2 Publish/Subscribe System
+**Files to create**:
+- `src/server/PubSub.js`
+
+**Commands to implement**:
+- PUBLISH, SUBSCRIBE, UNSUBSCRIBE
+- PSUBSCRIBE, PUNSUBSCRIBE (pattern subscriptions)
+- Channel management and message routing
+
+### Phase 9: Server Enhancement & Protocol (Priority: HIGH)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 1-2 complete
+
+#### 9.1 RESP Protocol Implementation
+**Files to enhance**:
+- `src/server/RESPParser.js`
+
+**Features to implement**:
+- Complete RESP protocol support
+- Bulk strings, arrays, integers, errors
+- Pipeline command processing
+- Binary data support
+
+#### 9.2 Client Connection Management
+**Files to create**:
+- `src/server/ClientManager.js`
+
+**Features to implement**:
+- Multiple client connections
+- Connection pooling and management
+- Client timeout handling
+- Memory usage per client tracking
+
+### Phase 10: Persistence Systems (Priority: HIGH)
+
+**Timeline**: 4-5 days
+**Dependencies**: Phase 7 complete
+
+#### 10.1 Append-Only File (AOF)
+**Files to create**:
+- `src/persistence/AOF.js`
+
+**Features to implement**:
+- Write operation logging
+- AOF file rotation and compaction
+- Configurable sync policies (always, every second, no)
+- Recovery and replay on startup
+
+#### 10.2 RDB Snapshots
+**Files to create**:
+- `src/persistence/RDB.js`
+
+**Features to implement**:
+- Point-in-time snapshots
+- Efficient binary serialization
+- Background saving (fork simulation)
+- Incremental snapshots
+
+#### 10.3 Persistence Coordination
+**Files to create**:
+- `src/persistence/PersistenceManager.js`
+
+**Features to implement**:
+- Hybrid persistence (AOF + RDB)
+- Configurable persistence policies
+- Data recovery strategies
+
+### Phase 11: Replication System (Priority: MEDIUM)
+
+**Timeline**: 4-5 days
+**Dependencies**: Phase 10 complete
+
+#### 11.1 Master-Slave Architecture
+**Files to create**:
+- `src/replication/Master.js`
+- `src/replication/Slave.js`
+- `src/replication/ReplicationManager.js`
+
+**Features to implement**:
+- Initial data synchronization
+- Real-time command forwarding
+- Slave promotion capabilities
+- Network partition handling
+
+### Phase 12: Client Library Development (Priority: HIGH)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 9 complete
+
+#### 12.1 Client Implementation
+**Files to create**:
+- `src/client/RedisClient.js`
+
+**Features to implement**:
+- All server operation methods
+- Automatic connection management
+- Error handling and retries
+- Connection pooling
+
+#### 12.2 Advanced Client Features
+**Files to create**:
+- `src/client/Pipeline.js`
+- `src/client/ClientCache.js`
+
+**Features to implement**:
+- Command pipelining
+- Client-side caching with invalidation
+- Batch operations
+- Async/await interface
+
+### Phase 13: Performance Optimization (Priority: MEDIUM)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 12 complete
+
+#### 13.1 Caching and Pipelining
+**Files to enhance**:
+- Multiple files for optimization
+
+**Features to implement**:
+- Memory usage optimization
+- Command batching
+- Network optimization
+- CPU usage profiling and optimization
+
+#### 13.2 Vector and Document Optimization
+**Features to implement**:
+- High-dimensional vector optimization
+- Efficient document serialization
+- Index optimization
+- Query performance tuning
+
+### Phase 14: Security Implementation (Priority: MEDIUM)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 9 complete
+
+#### 14.1 Authentication and Authorization
+**Files to create**:
+- `src/security/Authentication.js`
+- `src/security/ACL.js`
+
+**Features to implement**:
+- Basic authentication mechanisms
+- Access Control Lists (ACL)
+- Role-based permissions
+- Command-level access control
+
+#### 14.2 TLS/SSL Support
+**Files to create**:
+- `src/security/TLS.js`
+
+**Features to implement**:
+- Encrypted client-server communication
+- Certificate management
+- Secure connection establishment
+
+### Phase 15: Advanced Features (Priority: LOW)
+
+**Timeline**: 5-6 days
+**Dependencies**: Phase 11 complete
+
+#### 15.1 Lua Scripting
+**Files to create**:
+- `src/scripting/LuaEngine.js`
+- `src/scripting/ScriptManager.js`
+
+**Features to implement**:
+- Lua script execution environment
+- Script caching and management
+- EVAL, EVALSHA commands
+- Script debugging capabilities
+
+#### 15.2 Basic Clustering
+**Files to create**:
+- `src/clustering/HashSlots.js`
+- `src/clustering/ClusterNode.js`
+- `src/clustering/ClusterManager.js`
+
+**Features to implement**:
+- Hash slot-based data distribution
+- Node discovery and communication
+- Data migration between nodes
+- Failover mechanisms
+
+### Phase 16: Monitoring & Management (Priority: MEDIUM)
+
+**Timeline**: 2-3 days
+**Dependencies**: Phase 8 complete
+
+#### 16.1 Server Information
+**Files to create**:
+- `src/monitoring/Info.js`
+- `src/monitoring/SlowLog.js`
+- `src/monitoring/Metrics.js`
+
+**Commands to implement**:
+- INFO (server statistics and information)
+- SLOWLOG (slow query identification)
+- Real-time metrics collection
+- Performance monitoring
+
+### Phase 17: Keyspace Notifications (Priority: LOW)
+
+**Timeline**: 2-3 days
+**Dependencies**: Phase 8 complete
+
+#### 17.1 Event System
+**Features to implement**:
+- Keyspace event notifications
+- Configurable notification types
+- Client-side event listeners
+- Pattern-based event subscriptions
+
+### Phase 18: Redis Patterns Implementation (Priority: LOW)
+
+**Timeline**: 3-4 days
+**Dependencies**: Phase 8 complete
+
+#### 18.1 Common Patterns
+**Files to create**:
+- Examples and utilities for:
+  - Distributed locks
+  - Rate limiting
+  - Message queues
+  - Caching layer patterns
+
+### Phase 19: CLI Development (Priority: HIGH)
+
+**Timeline**: 2-3 days
+**Dependencies**: Phase 12 complete
+
+#### 19.1 Command Line Interface
+**Files to create**:
+- `cli/redis-cli.js`
+- `cli/interactive-shell.js`
+
+**Features to implement**:
+- Interactive shell with command completion
+- Batch command execution
+- Output formatting options
+- Connection management
+
+### Phase 20: Testing & Quality Assurance (Priority: CRITICAL)
+
+**Timeline**: 4-5 days
+**Dependencies**: All phases
+
+#### 20.1 Comprehensive Testing
+**Files to create**:
+- Complete test suite covering all functionality
+- Performance benchmarking
+- Redis compatibility testing
+- Stress testing
+
+#### 20.2 Documentation
+**Files to create**:
+- Complete API documentation
+- Architecture documentation
+- Performance analysis
+- User guides
+
+## 🧪 TESTING STRATEGY
+
+### Unit Testing Requirements
+- Test coverage > 90% for all core functionality
+- Mock external dependencies
+- Test edge cases and error conditions
+- Performance regression testing
+
+### Integration Testing Requirements
+- Full server-client interaction testing
+- Persistence and recovery testing
+- Replication testing
+- Cross-platform compatibility
+
+### Performance Testing Requirements
+- Benchmark against Redis for similar operations
+- Memory usage profiling
+- Throughput and latency measurements
+- Stress testing with high concurrency
+
+## 📋 ACCEPTANCE CRITERIA PER PHASE
+
+Each phase must meet these criteria before proceeding:
+
+1. **Functionality**: All specified commands work correctly
+2. **Performance**: No major performance regressions
+3. **Testing**: Unit tests pass with >90% coverage
+4. **Documentation**: Code is well-documented
+5. **Integration**: Integrates properly with existing codebase
+6. **Error Handling**: Proper error handling and user feedback
+
+## 🔧 DEVELOPMENT GUIDELINES
+
+### Code Quality Standards
+- Use ES6+ JavaScript features
+- Implement proper error handling
+- Follow consistent naming conventions
+- Write comprehensive JSDoc comments
+- Use async/await for asynchronous operations
+
+### Performance Requirements
+- Memory usage should be competitive with Redis
+- Command execution should be within 2x of Redis performance
+- Support for millions of keys without significant degradation
+- Efficient network protocol implementation
+
+### Security Considerations
+- Input validation and sanitization
+- Protection against command injection
+- Secure default configurations
+- Audit logging for security events
+
+## 📦 DEPENDENCIES
+
+### Core Dependencies
+```json
+{
+  "dependencies": {
+    "commander": "^9.0.0",
+    "winston": "^3.8.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "benchmark": "^2.1.4",
+    "eslint": "^8.0.0"
+  }
+}
+```
+
+### Optional Dependencies
+- For Lua scripting: `lua-vm`
+- For clustering: Custom networking utilities
+- For TLS: Node.js built-in `tls` module
+
+## 🚀 DEPLOYMENT CONSIDERATIONS
+
+### Standalone Mode
+- Single server instance
+- All features available
+- Suitable for development and testing
+
+### Production Considerations
+- Memory management and monitoring
+- Proper logging and error handling
+- Configuration management
+- Health check endpoints
+
+## 📊 SUCCESS METRICS
+
+### Performance Targets
+- **Throughput**: >50,000 ops/sec for simple operations
+- **Memory**: <2x Redis memory usage for equivalent data
+- **Latency**: <1ms for cache hits, <10ms for complex operations
+- **Concurrent Connections**: Support >1000 concurrent clients
+
+### Functionality Targets
+- **Redis Compatibility**: >80% command compatibility
+- **Data Structures**: All specified data types implemented
+- **Persistence**: Both AOF and RDB working correctly
+- **Replication**: Master-slave replication functional
+
+## 🔄 ITERATIVE DEVELOPMENT APPROACH
+
+1. **Build Incrementally**: Each phase builds on previous phases
+2. **Test Continuously**: Run tests after each major feature
+3. **Optimize Later**: Focus on functionality first, then performance
+4. **Document as You Go**: Maintain documentation throughout development
+5. **Benchmark Regularly**: Compare performance with Redis periodically
+
+## 🎯 FINAL DELIVERABLES
+
+1. **Complete Redis-like server** with all specified features
+2. **Comprehensive client library** for JavaScript applications
+3. **Command-line interface** for manual testing and administration
+4. **Complete test suite** with high coverage
+5. **Performance benchmarks** comparing to Redis
+6. **Documentation** covering API, architecture, and deployment
+7. **Example applications** demonstrating usage
+
+---
+
+**Start with Phase 1 and work systematically through each phase. Do not skip phases or rush implementation. Quality and correctness are more important than speed.**
+
+## AI INSTRUCTIONS FOR IMPLEMENTATION
+
+When implementing this project:
+
+1. **Start with Phase 1** - Do not jump ahead to later phases
+2. **Complete acceptance criteria** for each phase before moving to the next
+3. **Test thoroughly** - Each feature should work correctly before moving on
+4. **Maintain code quality** - Follow the guidelines and standards outlined
+5. **Ask for clarification** if any requirements are unclear
+6. **Document decisions** - Explain architectural choices and trade-offs
+7. **Optimize incrementally** - Don't over-optimize early, focus on correctness first
+8. **Use meaningful commits** - Each phase should have clear commit messages
+9. **Handle errors gracefully** - Implement proper error handling throughout
+10. **Stay original** - Do not copy code from existing Redis implementations
+
+Remember: This is an assessment project, so code quality, architecture decisions, and implementation approach are as important as the final functionality.
