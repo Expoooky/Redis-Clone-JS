@@ -636,4 +636,8 @@ class LuaEngine {
   }
 }
 
-module.exports = { LuaEngine, LuaInterpreter }
+// Export both with LuaEngine as an alias to LuaInterpreter for compatibility
+module.exports = { 
+  LuaEngine: LuaInterpreter, 
+  LuaInterpreter 
+}

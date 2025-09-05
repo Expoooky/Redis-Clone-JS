@@ -24,7 +24,7 @@ class ClientCache {
       invalidations: 0
     };
   }
-
+  
   /**
    * Get value from cache
    */
@@ -52,7 +52,7 @@ class ClientCache {
     this.stats.hits++;
     return entry.value;
   }
-
+  
   /**
    * Set value in cache
    */
@@ -85,7 +85,7 @@ class ClientCache {
     this.accessOrder++;
     this.keyOrder.set(key, this.accessOrder);
   }
-
+  
   /**
    * Check if key exists in cache
    */
@@ -105,7 +105,7 @@ class ClientCache {
     
     return true;
   }
-
+  
   /**
    * Delete specific key from cache
    */
@@ -215,7 +215,7 @@ class ClientCache {
     
     return value;
   }
-
+  
   /**
    * Get cache statistics
    */
@@ -233,7 +233,7 @@ class ClientCache {
       memoryEstimate: this._estimateMemoryUsage()
     };
   }
-
+  
   /**
    * Reset cache statistics
    */
@@ -245,7 +245,7 @@ class ClientCache {
       invalidations: 0
     };
   }
-
+  
   /**
    * Get all cache keys
    */

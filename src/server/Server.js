@@ -25,14 +25,26 @@ const { VectorOps } = require('../vector-db/VectorOps')
 const { DocumentStore } = require('../document-db/DocumentStore')
 const { QueryEngine } = require('../document-db/QueryEngine')
 const { AggregationEngine } = require('../document-db/AggregationEngine')
-const { IndexManager } = require('../document-db/IndexManager')
 const { MultiExecManager } = require('../transactions/MultiExec')
 const { PubSubManager } = require('./PubSub')
 const { PersistenceManager } = require('../persistence/PersistenceManager')
 const { LuaEngine } = require('../scripting/LuaEngine')
+const ScriptManager = require('../scripting/ScriptManager')
 const { ReplicationManager } = require('../replication/ReplicationManager')
 const { Master } = require('../replication/Master')
 const { Slave } = require('../replication/Slave')
+const { ClusterManager } = require('../clustering/ClusterManager')
+const PerformanceMonitor = require('../monitoring/PerformanceMonitor')
+const MemoryOptimizer = require('../monitoring/MemoryOptimizer')
+const NetworkOptimizer = require('../monitoring/NetworkOptimizer')
+const ServerInfo = require('../monitoring/Info')
+const SlowLog = require('../monitoring/SlowLog')
+const Metrics = require('../monitoring/Metrics')
+const KeyspaceNotifications = require('../notifications/KeyspaceNotifications')
+const NotificationManager = require('../notifications/NotificationManager')
+const Authentication = require('../security/Authentication')
+const ACL = require('../security/ACL')
+const TLSManager = require('../security/TLS')
 const logger = require('../utils/Logger')
 const config = require('../utils/Config')
 
@@ -86,11 +98,91 @@ class RedisServer extends EventEmitter {
       autoSaveChanges: config.get('persistence.autosave.changes', 1)
     })
     this.luaEngine = new LuaEngine(this)
+    this.scriptManager = new ScriptManager(this.luaEngine)
+    
+    // Initialize clustering system
+    this.clusterManager = new ClusterManager({
+      port: this.config.port,
+      host: this.config.host,
+      clusterEnabled: this.config.cluster?.enabled || false,
+      clusterConfigFile: this.config.cluster?.configFile || 'nodes.conf',
+      clusterNodeTimeout: this.config.cluster?.nodeTimeout || 15000,
+      clusterRequireFullCoverage: this.config.cluster?.requireFullCoverage !== false
+    })
     
     // Initialize replication system
     this.replicationManager = new ReplicationManager(this)
     this.masterServer = null // Will be initialized if acting as master
     this.slaveServer = null // Will be initialized if acting as slave
+    
+    // Initialize performance monitoring and optimization
+    this.performanceMonitor = new PerformanceMonitor({
+      enabled: config.get('monitoring.performance.enabled', true),
+      monitoringInterval: config.get('monitoring.performance.interval', 1000),
+      memoryThreshold: config.get('monitoring.performance.memoryThreshold', 0.8),
+      cpuThreshold: config.get('monitoring.performance.cpuThreshold', 0.7)
+    })
+    
+    this.memoryOptimizer = new MemoryOptimizer(this.dataStore, {
+      enabled: config.get('optimization.memory.enabled', true),
+      maxMemoryPolicy: config.get('optimization.memory.policy', 'allkeys-lru'),
+      optimizationInterval: config.get('optimization.memory.interval', 30000)
+    })
+    
+    this.networkOptimizer = new NetworkOptimizer({
+      enabled: config.get('optimization.network.enabled', true),
+      maxConnections: this.config.maxClients,
+      batchingEnabled: config.get('optimization.network.batching', true)
+    })
+    
+    // Initialize monitoring systems (Phase 16)
+    this.serverInfo = new ServerInfo(this)
+    
+    this.slowLog = new SlowLog({
+      enabled: config.get('monitoring.slowlog.enabled', true),
+      slowlogMaxLen: config.get('monitoring.slowlog.maxLen', 128),
+      slowlogLogSlowerThan: config.get('monitoring.slowlog.threshold', 10000) // microseconds
+    })
+    
+    this.metrics = new Metrics({
+      enabled: config.get('monitoring.metrics.enabled', true),
+      collectionInterval: config.get('monitoring.metrics.interval', 1000),
+      retentionPeriod: config.get('monitoring.metrics.retention', 3600000), // 1 hour
+      maxDataPoints: config.get('monitoring.metrics.maxDataPoints', 3600)
+    })
+    
+    // Initialize keyspace notifications system (Phase 17)
+    this.keyspaceNotifications = new KeyspaceNotifications(this.pubSubManager)
+    this.notificationManager = new NotificationManager(this.pubSubManager, this.keyspaceNotifications)
+    
+    // Configure keyspace notifications from config
+    const notifyConfig = config.get('notifications.keyspace.events', '')
+    if (notifyConfig) {
+      this.keyspaceNotifications.configure(notifyConfig)
+    }
+    
+    // Initialize security systems
+    this.authentication = new Authentication({
+      enabled: config.get('security.auth.enabled', false),
+      defaultPassword: config.get('security.auth.password', null),
+      requireAuth: config.get('security.auth.required', false),
+      maxAttempts: config.get('security.auth.maxAttempts', 5),
+      lockoutDuration: config.get('security.auth.lockoutDuration', 300000),
+      auditLog: config.get('security.auth.auditLog', true)
+    })
+    
+    this.acl = new ACL({
+      enabled: config.get('security.acl.enabled', false),
+      defaultUser: config.get('security.acl.defaultUser', 'default'),
+      strictMode: config.get('security.acl.strictMode', false)
+    })
+    
+    this.tlsManager = new TLSManager({
+      enabled: config.get('security.tls.enabled', false),
+      certFile: config.get('security.tls.certFile', null),
+      keyFile: config.get('security.tls.keyFile', null),
+      requireClientCert: config.get('security.tls.requireClientCert', false)
+    })
     
     // Set server reference after construction to avoid circular dependency
     this.multiExecManager.setServer(this)
@@ -158,6 +250,26 @@ class RedisServer extends EventEmitter {
           this.logger.error('Failed to initialize replication', error)
         }
         
+        // Initialize clustering system
+        try {
+          await this.clusterManager.initialize()
+          this.logger.info('Cluster system initialized', {
+            clusterEnabled: this.clusterManager.options.clusterEnabled
+          })
+        } catch (error) {
+          this.logger.error('Failed to initialize cluster system', error)
+        }
+        
+        // Start performance monitoring and optimization
+        try {
+          this.performanceMonitor.start()
+          this.memoryOptimizer.start()
+          this.networkOptimizer.start()
+          this.logger.info('Performance monitoring and optimization started')
+        } catch (error) {
+          this.logger.error('Failed to start performance systems', error)
+        }
+        
         this.logger.info('Server started', {
           host: this.config.host,
           port: this.config.port
@@ -200,6 +312,29 @@ class RedisServer extends EventEmitter {
         this.slaveServer.cleanup()
       }
       
+      // Cleanup clustering system
+      if (this.clusterManager) {
+        try {
+          this.clusterManager.cleanup().then(() => {
+            this.logger.info('Cluster system cleaned up')
+          }).catch((error) => {
+            this.logger.error('Failed to cleanup cluster system', error)
+          })
+        } catch (error) {
+          this.logger.error('Failed to cleanup cluster system', error)
+        }
+      }
+      
+      // Stop performance monitoring and optimization
+      try {
+        this.performanceMonitor.stop()
+        this.memoryOptimizer.stop()
+        this.networkOptimizer.stop()
+        this.logger.info('Performance monitoring and optimization stopped')
+      } catch (error) {
+        this.logger.error('Failed to stop performance systems', error)
+      }
+      
       // Close all client connections
       for (const [clientId, client] of this.clients) {
         this.logger.debug('Closing client connection', { clientId })
@@ -230,6 +365,12 @@ class RedisServer extends EventEmitter {
         maxClients: this.config.maxClients,
         currentClients: this.clients.size
       })
+      
+      // Track rejected connection for monitoring (Phase 16)
+      if (this.serverInfo) {
+        this.serverInfo.recordConnection('reject')
+      }
+      
       socket.end('-ERR max number of clients reached\r\n')
       return
     }
@@ -244,6 +385,11 @@ class RedisServer extends EventEmitter {
     }
 
     this.clients.set(clientId, client)
+    
+    // Track connection for monitoring (Phase 16)
+    if (this.serverInfo) {
+      this.serverInfo.recordConnection('connect')
+    }
     
     // Set socket options
     socket.setKeepAlive(true, 300000) // 5 minutes
@@ -491,14 +637,65 @@ class RedisServer extends EventEmitter {
    * @param {Array} args - Command arguments
    */
   async routeCommand(client, command, args) {
-    // Select appropriate database for this client
-    this.dataStore.select(client.database)
+    // Performance tracking
+    const startTime = process.hrtime.bigint()
+    let error = false
+    
+    try {
+      // Select appropriate database for this client
+      this.dataStore.select(client.database)
 
-    // Check read-only mode for slaves
-    if (this.slaveServer && this.slaveServer.shouldRejectWrites() && this.isWriteCommand(command)) {
-      this.sendError(client, 'READONLY You can\'t write against a read only replica.')
-      return
-    }
+      // Check authentication if required (except for AUTH and HELLO commands)
+      if (!['AUTH', 'HELLO', 'QUIT'].includes(command) && this.authentication.isEnabled()) {
+        if (!client.authenticated && this.authentication.options.requireAuth) {
+          this.sendError(client, 'NOAUTH Authentication required.')
+          error = true
+          return
+        }
+      }
+
+      // Check ACL permissions (if enabled and user authenticated)
+      if (this.acl.isEnabled() && client.authenticated) {
+        const username = client.username || this.acl.options.defaultUser
+        const key = args[0] || null
+        
+        if (!this.acl.checkPermission(username, command, key)) {
+          this.sendError(client, `NOPERM this user has no permissions to run the '${command}' command`)
+          error = true
+          return
+        }
+      }
+
+      // Check read-only mode for slaves
+      if (this.slaveServer && this.slaveServer.shouldRejectWrites() && this.isWriteCommand(command)) {
+        this.sendError(client, 'READONLY You can\'t write against a read only replica.')
+        error = true
+        return
+      }
+      
+      // Track memory optimization
+      if (this.memoryOptimizer) {
+        this.memoryOptimizer.trackKeyAccess(args[0] || 'unknown')
+      }
+
+      // Handle cluster routing (if cluster is enabled)
+      if (this.clusterManager.options.clusterEnabled && !['CLUSTER', 'PING', 'AUTH', 'HELLO'].includes(command)) {
+        const key = args[0]
+        if (key) {
+          const routingResult = this.clusterManager.routeCommand(key, command, args)
+          if (!routingResult.execute) {
+            // Need to redirect to another node
+            const redirect = routingResult.redirect
+            if (redirect.type === 'MOVED') {
+              this.sendError(client, `MOVED ${redirect.slot} ${redirect.host}:${redirect.port}`)
+            } else if (redirect.type === 'ASK') {
+              this.sendError(client, `ASK ${redirect.slot} ${redirect.host}:${redirect.port}`)
+            }
+            error = true
+            return
+          }
+        }
+      }
 
     switch (command) {
       // Basic commands
@@ -1036,6 +1233,9 @@ class RedisServer extends EventEmitter {
       case 'INFO':
         this.handleInfo(client, args)
         break
+      case 'SLOWLOG':
+        this.handleSlowLog(client, args)
+        break
       case 'PSYNC':
         await this.handlePSync(client, args)
         break
@@ -1043,8 +1243,32 @@ class RedisServer extends EventEmitter {
         this.handleReplConf(client, args)
         break
 
+      // Authentication commands
+      case 'AUTH':
+        await this.handleAuth(client, args)
+        break
+      case 'HELLO':
+        await this.handleHello(client, args)
+        break
+      
+      // ACL commands
+      case 'ACL':
+        await this.handleACL(client, args)
+        break
+      
+      // Configuration commands
+      case 'CONFIG':
+        this.handleConfig(client, args)
+        break
+      
+      // Cluster commands
+      case 'CLUSTER':
+        await this.handleCluster(client, args)
+        break
+
       default:
         this.sendError(client, `ERR unknown command '${command}'`)
+        error = true
     }
 
     // Log command for persistence (only for write operations)
@@ -1070,6 +1294,63 @@ class RedisServer extends EventEmitter {
           })
         })
       })
+    }
+    
+    } catch (cmdError) {
+      error = true
+      this.logger.error('Error in command execution', {
+        command,
+        error: cmdError.message,
+        clientId: client.id,
+        component: 'RedisServer'
+      })
+    } finally {
+      // Record performance metrics
+      const endTime = process.hrtime.bigint()
+      const latency = Number(endTime - startTime) / 1000000 // Convert to milliseconds
+      const latencyMicros = Number(endTime - startTime) / 1000 // Convert to microseconds
+      
+      // Phase 13 monitoring (existing)
+      if (this.performanceMonitor) {
+        this.performanceMonitor.recordCommand(command, latency, error)
+      }
+      
+      if (this.networkOptimizer) {
+        this.networkOptimizer.recordCommand(client.id, command, latency)
+      }
+      
+      // Phase 16 monitoring (new)
+      // Update server statistics
+      if (this.serverInfo) {
+        const inputBytes = args.reduce((sum, arg) => sum + (arg ? arg.toString().length : 0), 0)
+        const outputBytes = 64 // Rough estimate for response size
+        this.serverInfo.updateStats(command, latencyMicros, inputBytes, outputBytes)
+      }
+      
+      // Log slow queries
+      if (this.slowLog) {
+        const clientInfo = {
+          host: client.remoteAddress || '127.0.0.1',
+          port: client.remotePort || 0,
+          name: client.name || ''
+        }
+        this.slowLog.logCommand(command, args, latencyMicros, Math.floor(Date.now() / 1000), clientInfo)
+      }
+      
+      // Record metrics
+      if (this.metrics) {
+        this.metrics.increment('commands.total')
+        this.metrics.increment(`commands.${command.toLowerCase()}`)
+        this.metrics.timing('commands.latency', latency)
+        this.metrics.timing(`commands.${command.toLowerCase()}.latency`, latency)
+        
+        if (error) {
+          this.metrics.increment('commands.errors')
+          this.metrics.increment(`commands.${command.toLowerCase()}.errors`)
+        } else {
+          this.metrics.increment('commands.success')
+        }
+      }
     }
   }
 
@@ -1119,6 +1400,16 @@ class RedisServer extends EventEmitter {
     }
 
     const result = this.stringOps.get(args[0])
+    
+    // Track cache hit/miss for monitoring (Phase 16)
+    if (this.serverInfo) {
+      if (result.success && result.value !== null && result.value !== undefined) {
+        this.serverInfo.recordCacheAccess(true) // Hit
+      } else {
+        this.serverInfo.recordCacheAccess(false) // Miss
+      }
+    }
+    
     if (result.success) {
       this.sendBulkString(client, result.value)
     } else {
@@ -1143,6 +1434,8 @@ class RedisServer extends EventEmitter {
 
     const result = this.stringOps.set(key, value, options)
     if (result.success) {
+      // Notify keyspace event for SET operation
+      this.notifyKeyspaceEvent('set', key, client.database, client)
       this.sendSimpleString(client, result.value)
     } else {
       this.sendError(client, result.error)
@@ -1159,6 +1452,8 @@ class RedisServer extends EventEmitter {
     for (const key of args) {
       const result = this.dataStore.del(key)
       if (result.success) {
+        // Notify keyspace event for DEL operation
+        this.notifyKeyspaceEvent('del', key, client.database, client)
         deletedCount += result.value
       }
     }
@@ -5394,6 +5689,888 @@ class RedisServer extends EventEmitter {
     }
   }
 
+  /**
+   * Handle AUTH command
+   */
+  async handleAuth(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'auth\' command')
+      return
+    }
+
+    try {
+      let result
+
+      if (args.length === 1) {
+        // AUTH password - default authentication
+        const password = args[0]
+        result = await this.authentication.authenticate(password, {
+          ip: client.remoteAddress,
+          userAgent: 'redis-client'
+        })
+      } else if (args.length === 2) {
+        // AUTH username password - user authentication
+        const [username, password] = args
+        result = await this.authentication.authenticateUser(username, password, {
+          ip: client.remoteAddress,
+          userAgent: 'redis-client'
+        })
+        
+        if (result.success) {
+          client.username = username
+          client.roles = result.roles || []
+        }
+      } else {
+        this.sendError(client, 'ERR syntax error')
+        return
+      }
+
+      if (result.success) {
+        client.authenticated = true
+        client.sessionId = result.sessionId
+        this.sendSimpleString(client, 'OK')
+      } else {
+        this.sendError(client, result.error || 'ERR invalid password')
+      }
+    } catch (error) {
+      this.logger.error('Authentication error', { error: error.message, clientId: client.id })
+      this.sendError(client, 'ERR authentication failed')
+    }
+  }
+
+  /**
+   * Handle HELLO command (Redis 6+ protocol negotiation with auth)
+   */
+  async handleHello(client, args) {
+    const version = args.length > 0 ? parseInt(args[0]) : 3
+    
+    if (version < 2 || version > 3) {
+      this.sendError(client, 'NOPROTO unsupported protocol version')
+      return
+    }
+
+    // Parse optional AUTH parameters
+    let authResult = { success: true }
+    
+    for (let i = 1; i < args.length; i += 2) {
+      const option = args[i] ? args[i].toUpperCase() : ''
+      const value = args[i + 1]
+      
+      if (option === 'AUTH' && i + 2 < args.length) {
+        const username = value
+        const password = args[i + 2]
+        i++ // Skip password in next iteration
+        
+        try {
+          authResult = await this.authentication.authenticateUser(username, password, {
+            ip: client.remoteAddress,
+            userAgent: 'redis-client'
+          })
+          
+          if (authResult.success) {
+            client.authenticated = true
+            client.username = username
+            client.roles = authResult.roles || []
+            client.sessionId = authResult.sessionId
+          }
+        } catch (error) {
+          authResult = { success: false, error: 'ERR authentication failed' }
+        }
+      }
+    }
+
+    if (!authResult.success) {
+      this.sendError(client, authResult.error || 'ERR authentication failed')
+      return
+    }
+
+    // Send HELLO response
+    const response = [
+      'server', 'redis',
+      'version', '7.0.0',
+      'proto', version,
+      'id', client.id,
+      'mode', this.slaveServer ? 'replica' : 'master',
+      'role', this.slaveServer ? 'replica' : 'master',
+      'modules', []
+    ]
+
+    this.sendArray(client, response)
+  }
+
+  /**
+   * Handle ACL command
+   */
+  async handleACL(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'acl\' command')
+      return
+    }
+
+    const subcommand = args[0].toUpperCase()
+
+    try {
+      switch (subcommand) {
+        case 'LIST':
+          await this.handleACLList(client, args.slice(1))
+          break
+        
+        case 'USERS':
+          await this.handleACLUsers(client, args.slice(1))
+          break
+          
+        case 'GETUSER':
+          await this.handleACLGetUser(client, args.slice(1))
+          break
+          
+        case 'SETUSER':
+          await this.handleACLSetUser(client, args.slice(1))
+          break
+          
+        case 'DELUSER':
+          await this.handleACLDelUser(client, args.slice(1))
+          break
+          
+        case 'GENPASS':
+          await this.handleACLGenPass(client, args.slice(1))
+          break
+          
+        case 'WHOAMI':
+          await this.handleACLWhoAmI(client, args.slice(1))
+          break
+          
+        default:
+          this.sendError(client, `ERR Unknown subcommand or wrong number of arguments for '${subcommand}'. Try ACL HELP.`)
+      }
+    } catch (error) {
+      this.logger.error('ACL command error', { error: error.message, subcommand, clientId: client.id })
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle ACL LIST command
+   */
+  async handleACLList(client, args) {
+    const users = this.acl.listUsers()
+    const userStrings = users.map(user => {
+      const parts = [`user ${user.username}`]
+      
+      if (user.active) {
+        parts.push('on')
+      } else {
+        parts.push('off')
+      }
+      
+      // Add roles as commands for simplicity
+      user.roles.forEach(role => parts.push(`+@${role}`))
+      
+      return parts.join(' ')
+    })
+    
+    this.sendArray(client, userStrings)
+  }
+
+  /**
+   * Handle ACL USERS command
+   */
+  async handleACLUsers(client, args) {
+    const users = this.acl.listUsers()
+    const usernames = users.map(user => user.username)
+    this.sendArray(client, usernames)
+  }
+
+  /**
+   * Handle ACL GETUSER command
+   */
+  async handleACLGetUser(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'acl getuser\' command')
+      return
+    }
+
+    const username = args[0]
+    
+    try {
+      const permissions = this.acl.getUserPermissions(username)
+      
+      const response = [
+        'flags', permissions.active ? ['on'] : ['off'],
+        'passwords', ['*'], // Simplified
+        'commands', permissions.rolePermissions.commands,
+        'keys', permissions.rolePermissions.keys || ['*'],
+        'channels', permissions.rolePermissions.channels || ['*']
+      ]
+      
+      this.sendArray(client, response)
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle ACL SETUSER command
+   */
+  async handleACLSetUser(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'acl setuser\' command')
+      return
+    }
+
+    const username = args[0]
+    let password = null
+    const roles = ['default']
+
+    // Parse ACL rules (simplified)
+    for (let i = 1; i < args.length; i++) {
+      const rule = args[i]
+      
+      if (rule.startsWith('>')) {
+        password = rule.substring(1)
+      } else if (rule.startsWith('+')) {
+        // Add command permission - we'll map this to roles for simplicity
+        const command = rule.substring(1)
+        if (command === 'get' || command === '@read') {
+          roles.push('readonly')
+        } else if (command === 'set' || command === '@write') {
+          roles.push('writer')
+        } else if (command === '*' || command === '@all') {
+          roles.push('admin')
+        }
+      }
+    }
+
+    try {
+      if (this.acl.userExists(username)) {
+        // User exists, update roles
+        const currentRoles = this.acl.getUserRoles(username)
+        roles.forEach(role => {
+          if (!currentRoles.includes(role)) {
+            this.acl.addUserRole(username, role)
+          }
+        })
+      } else {
+        // Create new user
+        await this.acl.createUser(username, password, roles)
+      }
+      
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle ACL DELUSER command
+   */
+  async handleACLDelUser(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'acl deluser\' command')
+      return
+    }
+
+    let deletedCount = 0
+    
+    for (const username of args) {
+      try {
+        if (username === 'default') {
+          // Cannot delete default user
+          continue
+        }
+        
+        this.acl.deleteUser(username)
+        deletedCount++
+      } catch (error) {
+        // User doesn't exist, ignore
+      }
+    }
+    
+    this.sendInteger(client, deletedCount)
+  }
+
+  /**
+   * Handle ACL GENPASS command
+   */
+  async handleACLGenPass(client, args) {
+    const length = args.length > 0 ? parseInt(args[0]) : 32
+    
+    if (length < 4 || length > 128) {
+      this.sendError(client, 'ERR ACL GENPASS argument must be the number of characters for the password')
+      return
+    }
+    
+    const crypto = require('crypto')
+    const password = crypto.randomBytes(Math.ceil(length / 2)).toString('hex').substring(0, length)
+    
+    this.sendBulkString(client, password)
+  }
+
+  /**
+   * Handle ACL WHOAMI command
+   */
+  async handleACLWhoAmI(client, args) {
+    const username = client.username || this.acl.options.defaultUser
+    this.sendBulkString(client, username)
+  }
+
+  /**
+   * Handle EVAL command
+   */
+  async handleEval(client, args) {
+    if (args.length < 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'eval\' command')
+      return
+    }
+
+    const script = args[0]
+    const numKeys = parseInt(args[1])
+    
+    if (isNaN(numKeys) || numKeys < 0) {
+      this.sendError(client, 'ERR value is not an integer or out of range')
+      return
+    }
+
+    const keys = args.slice(2, 2 + numKeys)
+    const argv = args.slice(2 + numKeys)
+
+    try {
+      // Register script with ScriptManager
+      const sha1 = this.scriptManager.registerScript(script)
+      
+      // Execute script
+      const result = await this.scriptManager.executeScript(sha1, keys, argv)
+      
+      if (result === null) {
+        this.sendNull(client)
+      } else if (typeof result === 'string') {
+        this.sendBulkString(client, result)
+      } else if (typeof result === 'number') {
+        this.sendInteger(client, result)
+      } else if (Array.isArray(result)) {
+        this.sendArray(client, result)
+      } else {
+        this.sendBulkString(client, String(result))
+      }
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle EVALSHA command
+   */
+  async handleEvalSha(client, args) {
+    if (args.length < 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'evalsha\' command')
+      return
+    }
+
+    const sha1 = args[0]
+    const numKeys = parseInt(args[1])
+    
+    if (isNaN(numKeys) || numKeys < 0) {
+      this.sendError(client, 'ERR value is not an integer or out of range')
+      return
+    }
+
+    const keys = args.slice(2, 2 + numKeys)
+    const argv = args.slice(2 + numKeys)
+
+    try {
+      if (!this.scriptManager.hasScript(sha1)) {
+        this.sendError(client, 'NOSCRIPT No matching script. Please use EVAL.')
+        return
+      }
+      
+      // Execute script by SHA1
+      const result = await this.scriptManager.executeScript(sha1, keys, argv)
+      
+      if (result === null) {
+        this.sendNull(client)
+      } else if (typeof result === 'string') {
+        this.sendBulkString(client, result)
+      } else if (typeof result === 'number') {
+        this.sendInteger(client, result)
+      } else if (Array.isArray(result)) {
+        this.sendArray(client, result)
+      } else {
+        this.sendBulkString(client, String(result))
+      }
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle SCRIPT command
+   */
+  handleScript(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'script\' command')
+      return
+    }
+
+    const subCommand = args[0].toString().toUpperCase()
+
+    switch (subCommand) {
+      case 'LOAD':
+        this.handleScriptLoad(client, args.slice(1))
+        break
+      case 'EXISTS':
+        this.handleScriptExists(client, args.slice(1))
+        break
+      case 'FLUSH':
+        this.handleScriptFlush(client, args.slice(1))
+        break
+      case 'KILL':
+        this.handleScriptKill(client, args.slice(1))
+        break
+      case 'DEBUG':
+        this.handleScriptDebug(client, args.slice(1))
+        break
+      default:
+        this.sendError(client, `ERR unknown SCRIPT subcommand '${subCommand}'`)
+    }
+  }
+
+  /**
+   * Handle SCRIPT LOAD command
+   */
+  handleScriptLoad(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'script load\' command')
+      return
+    }
+
+    const script = args[0]
+
+    try {
+      const sha1 = this.scriptManager.registerScript(script)
+      this.sendBulkString(client, sha1)
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle SCRIPT EXISTS command
+   */
+  handleScriptExists(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'script exists\' command')
+      return
+    }
+
+    const results = []
+    for (const sha1 of args) {
+      results.push(this.scriptManager.hasScript(sha1) ? 1 : 0)
+    }
+
+    this.sendArray(client, results)
+  }
+
+  /**
+   * Handle SCRIPT FLUSH command
+   */
+  handleScriptFlush(client, args) {
+    try {
+      const count = this.scriptManager.clearCache()
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle SCRIPT KILL command
+   */
+  handleScriptKill(client, args) {
+    // For now, just return OK as we don't have long-running scripts to kill
+    this.sendSimpleString(client, 'OK')
+  }
+
+  /**
+   * Handle SCRIPT DEBUG command
+   */
+  handleScriptDebug(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'script debug\' command')
+      return
+    }
+
+    const mode = args[0].toString().toUpperCase()
+    if (!['YES', 'NO', 'SYNC'].includes(mode)) {
+      this.sendError(client, 'ERR invalid debug mode')
+      return
+    }
+
+    try {
+      this.scriptManager.setDebugMode(mode === 'YES' || mode === 'SYNC')
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER command
+   */
+  async handleCluster(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster\' command')
+      return
+    }
+
+    const subCommand = args[0].toString().toUpperCase()
+
+    switch (subCommand) {
+      case 'NODES':
+        this.handleClusterNodes(client)
+        break
+      case 'INFO':
+        this.handleClusterInfo(client)
+        break
+      case 'KEYSLOT':
+        this.handleClusterKeyslot(client, args.slice(1))
+        break
+      case 'COUNTKEYSINSLOT':
+        this.handleClusterCountKeysInSlot(client, args.slice(1))
+        break
+      case 'GETKEYSINSLOT':
+        this.handleClusterGetKeysInSlot(client, args.slice(1))
+        break
+      case 'ADDSLOTS':
+        this.handleClusterAddSlots(client, args.slice(1))
+        break
+      case 'DELSLOTS':
+        this.handleClusterDelSlots(client, args.slice(1))
+        break
+      case 'SETSLOT':
+        this.handleClusterSetSlot(client, args.slice(1))
+        break
+      case 'MEET':
+        this.handleClusterMeet(client, args.slice(1))
+        break
+      case 'RESET':
+        this.handleClusterReset(client, args.slice(1))
+        break
+      case 'FAILOVER':
+        this.handleClusterFailover(client, args.slice(1))
+        break
+      default:
+        this.sendError(client, `ERR unknown CLUSTER subcommand '${subCommand}'`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER NODES command
+   */
+  handleClusterNodes(client) {
+    if (!this.clusterManager.options.clusterEnabled) {
+      this.sendError(client, 'ERR cluster support disabled')
+      return
+    }
+
+    const clusterState = this.clusterManager.getClusterState()
+    const nodesList = []
+
+    for (const [nodeId, nodeInfo] of Object.entries(clusterState.nodes)) {
+      const slots = nodeInfo.slotRanges ? nodeInfo.slotRanges.join(' ') : ''
+      const flags = nodeInfo.flags ? nodeInfo.flags.join(',') : ''
+      const line = `${nodeId} ${nodeInfo.host}:${nodeInfo.port}@${nodeInfo.busPort || nodeInfo.port + 10000} ${flags} - 0 0 0 connected ${slots}`
+      nodesList.push(line)
+    }
+
+    this.sendBulkString(client, nodesList.join('\n'))
+  }
+
+  /**
+   * Handle CLUSTER INFO command
+   */
+  handleClusterInfo(client) {
+    if (!this.clusterManager.options.clusterEnabled) {
+      this.sendError(client, 'ERR cluster support disabled')
+      return
+    }
+
+    const clusterState = this.clusterManager.getClusterState()
+    const topology = clusterState.topology
+    
+    const info = [
+      `cluster_state:${clusterState.state}`,
+      `cluster_slots_assigned:${topology.assignedSlots}`,
+      `cluster_slots_ok:${topology.assignedSlots}`,
+      `cluster_slots_pfail:0`,
+      `cluster_slots_fail:0`,
+      `cluster_known_nodes:${Object.keys(clusterState.nodes).length}`,
+      `cluster_size:${Object.keys(topology.nodes).length}`,
+      `cluster_current_epoch:${clusterState.epoch}`,
+      `cluster_my_epoch:${clusterState.epoch}`,
+      `cluster_stats_messages_ping_sent:${clusterState.stats.messagesSent}`,
+      `cluster_stats_messages_pong_sent:${clusterState.stats.messagesSent}`,
+      `cluster_stats_messages_sent:${clusterState.stats.messagesSent}`,
+      `cluster_stats_messages_received:${clusterState.stats.messagesReceived}`,
+      `cluster_stats_messages_ping_received:${clusterState.stats.messagesReceived}`,
+      `cluster_stats_messages_pong_received:${clusterState.stats.messagesReceived}`
+    ]
+
+    this.sendBulkString(client, info.join('\r\n'))
+  }
+
+  /**
+   * Handle CLUSTER KEYSLOT command
+   */
+  handleClusterKeyslot(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster keyslot\' command')
+      return
+    }
+
+    const key = args[0]
+    const slot = this.clusterManager.hashSlots.calculateSlot(key)
+    this.sendInteger(client, slot)
+  }
+
+  /**
+   * Handle CLUSTER COUNTKEYSINSLOT command
+   */
+  handleClusterCountKeysInSlot(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster countkeysinslot\' command')
+      return
+    }
+
+    const slot = parseInt(args[0])
+    if (isNaN(slot) || slot < 0 || slot >= 16384) {
+      this.sendError(client, 'ERR invalid slot')
+      return
+    }
+
+    // For simplicity, just return a count based on current keys
+    const allKeys = this.dataStore.keys('*')
+    let count = 0
+    for (const key of allKeys) {
+      if (this.clusterManager.hashSlots.calculateSlot(key) === slot) {
+        count++
+      }
+    }
+
+    this.sendInteger(client, count)
+  }
+
+  /**
+   * Handle CLUSTER GETKEYSINSLOT command
+   */
+  handleClusterGetKeysInSlot(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster getkeysinslot\' command')
+      return
+    }
+
+    const slot = parseInt(args[0])
+    const count = parseInt(args[1])
+
+    if (isNaN(slot) || slot < 0 || slot >= 16384) {
+      this.sendError(client, 'ERR invalid slot')
+      return
+    }
+
+    if (isNaN(count) || count < 0) {
+      this.sendError(client, 'ERR invalid count')
+      return
+    }
+
+    const allKeys = this.dataStore.keys('*')
+    const slotKeys = []
+    
+    for (const key of allKeys) {
+      if (this.clusterManager.hashSlots.calculateSlot(key) === slot) {
+        slotKeys.push(key)
+        if (slotKeys.length >= count) {
+          break
+        }
+      }
+    }
+
+    this.sendArray(client, slotKeys)
+  }
+
+  /**
+   * Handle CLUSTER ADDSLOTS command
+   */
+  async handleClusterAddSlots(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster addslots\' command')
+      return
+    }
+
+    const slots = []
+    for (const arg of args) {
+      const slot = parseInt(arg)
+      if (isNaN(slot) || slot < 0 || slot >= 16384) {
+        this.sendError(client, `ERR invalid slot ${arg}`)
+        return
+      }
+      slots.push(slot)
+    }
+
+    try {
+      this.clusterManager.assignSlots(this.clusterManager.myself.id, slots)
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER DELSLOTS command
+   */
+  async handleClusterDelSlots(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster delslots\' command')
+      return
+    }
+
+    const slots = []
+    for (const arg of args) {
+      const slot = parseInt(arg)
+      if (isNaN(slot) || slot < 0 || slot >= 16384) {
+        this.sendError(client, `ERR invalid slot ${arg}`)
+        return
+      }
+      slots.push(slot)
+    }
+
+    try {
+      this.clusterManager.hashSlots.removeSlots(this.clusterManager.myself.id, slots)
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER SETSLOT command
+   */
+  async handleClusterSetSlot(client, args) {
+    if (args.length < 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster setslot\' command')
+      return
+    }
+
+    const slot = parseInt(args[0])
+    const action = args[1].toString().toUpperCase()
+
+    if (isNaN(slot) || slot < 0 || slot >= 16384) {
+      this.sendError(client, 'ERR invalid slot')
+      return
+    }
+
+    try {
+      switch (action) {
+        case 'MIGRATING':
+          if (args.length !== 3) {
+            this.sendError(client, 'ERR wrong number of arguments')
+            return
+          }
+          const targetNode = args[2]
+          await this.clusterManager.startMigration(slot, this.clusterManager.myself.id, targetNode)
+          break
+        case 'IMPORTING':
+          // Handle importing state
+          break
+        case 'STABLE':
+          // Reset slot to stable state
+          break
+        case 'NODE':
+          if (args.length !== 3) {
+            this.sendError(client, 'ERR wrong number of arguments')
+            return
+          }
+          const nodeId = args[2]
+          this.clusterManager.assignSlots(nodeId, [slot])
+          break
+        default:
+          this.sendError(client, `ERR invalid CLUSTER SETSLOT action: ${action}`)
+          return
+      }
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER MEET command
+   */
+  async handleClusterMeet(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cluster meet\' command')
+      return
+    }
+
+    const host = args[0]
+    const port = parseInt(args[1])
+
+    if (isNaN(port) || port <= 0 || port > 65535) {
+      this.sendError(client, 'ERR invalid port')
+      return
+    }
+
+    try {
+      await this.clusterManager.meetNode(host, port)
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER RESET command
+   */
+  async handleClusterReset(client, args) {
+    const resetType = args.length > 0 ? args[0].toString().toUpperCase() : 'SOFT'
+    
+    if (!['SOFT', 'HARD'].includes(resetType)) {
+      this.sendError(client, 'ERR invalid reset type')
+      return
+    }
+
+    try {
+      // Reset cluster state
+      this.clusterManager.hashSlots.reset()
+      
+      if (resetType === 'HARD') {
+        // Also clear all data
+        this.dataStore.flushdb()
+      }
+      
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
+  /**
+   * Handle CLUSTER FAILOVER command
+   */
+  async handleClusterFailover(client, args) {
+    const forceOption = args.length > 0 ? args[0].toString().toUpperCase() : null
+    
+    if (forceOption && forceOption !== 'FORCE') {
+      this.sendError(client, 'ERR invalid failover option')
+      return
+    }
+
+    try {
+      // Initiate failover
+      await this.clusterManager.handleFailover(this.clusterManager.myself.id)
+      this.sendSimpleString(client, 'OK')
+    } catch (error) {
+      this.sendError(client, `ERR ${error.message}`)
+    }
+  }
+
   // Helper method to determine if a command modifies data and should be logged
   isWriteCommand(command) {
     const writeCommands = new Set([
@@ -5446,7 +6623,13 @@ class RedisServer extends EventEmitter {
       'FLUSHDB', 'FLUSHALL', 'SELECT',
       
       // Scripting operations (potentially modify data)
-      'EVAL', 'EVALSHA'
+      'EVAL', 'EVALSHA',
+      
+      // Security operations (for replication)
+      'ACL', 'AUTH',
+      
+      // Clustering operations (modify cluster state)
+      'CLUSTER'
     ])
     
     return writeCommands.has(command.toUpperCase())
@@ -5459,6 +6642,281 @@ class RedisServer extends EventEmitter {
       if (client) {
         this.sendArray(client, messageArray)
       }
+    }
+  }
+
+  // RESP response formatting methods
+  sendSimpleString(client, str) {
+    if (client.socket && !client.socket.destroyed) {
+      client.socket.write(`+${str}\r\n`)
+    }
+  }
+
+  sendError(client, error) {
+    if (client.socket && !client.socket.destroyed) {
+      client.socket.write(`-${error}\r\n`)
+    }
+  }
+
+  sendInteger(client, num) {
+    if (client.socket && !client.socket.destroyed) {
+      client.socket.write(`:${num}\r\n`)
+    }
+  }
+
+  sendBulkString(client, str) {
+    if (client.socket && !client.socket.destroyed) {
+      if (str === null || str === undefined) {
+        client.socket.write('$-1\r\n')
+      } else {
+        const strValue = String(str)
+        client.socket.write(`$${strValue.length}\r\n${strValue}\r\n`)
+      }
+    }
+  }
+
+  sendArray(client, arr) {
+    if (client.socket && !client.socket.destroyed) {
+      if (arr === null || arr === undefined) {
+        client.socket.write('*-1\r\n')
+      } else {
+        client.socket.write(`*${arr.length}\r\n`)
+        for (const item of arr) {
+          if (typeof item === 'number') {
+            this.sendInteger(client, item)
+          } else if (Array.isArray(item)) {
+            this.sendArray(client, item)
+          } else {
+            this.sendBulkString(client, item)
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle INFO command - Phase 16
+   */
+  handleInfo(client, args) {
+    let section = 'all'
+    
+    if (args.length > 0) {
+      section = args[0].toLowerCase()
+    }
+    
+    try {
+      const infoOutput = this.serverInfo.getInfo(section)
+      this.sendBulkString(client, infoOutput)
+    } catch (error) {
+      this.logger.error('Error handling INFO command', error)
+      this.sendError(client, 'ERR unable to generate server info')
+    }
+  }
+
+  /**
+   * Trigger keyspace notification for a key operation
+   * @param {string} operation - Operation name (e.g., 'set', 'del')
+   * @param {string} key - Key that was operated on
+   * @param {number} database - Database number (default: client's current database)
+   */
+  notifyKeyspaceEvent(operation, key, database = null, client = null) {
+    if (this.keyspaceNotifications && this.keyspaceNotifications.isEnabled()) {
+      const db = database !== null ? database : (client ? client.database : 0)
+      this.keyspaceNotifications.notify(operation, key, db)
+    }
+  }
+
+  /**
+   * Handle SLOWLOG command - Phase 16
+   */
+  handleSlowLog(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'slowlog\' command')
+      return
+    }
+    
+    const subcommand = args[0].toUpperCase()
+    
+    try {
+      switch (subcommand) {
+        case 'GET': {
+          const count = args.length > 1 ? parseInt(args[1], 10) : null
+          if (args.length > 1 && (isNaN(count) || count < 0)) {
+            this.sendError(client, 'ERR value is not an integer or out of range')
+            return
+          }
+          
+          const entries = this.slowLog.getEntries(count)
+          const result = entries.map(entry => [
+            entry.id,
+            entry.timestamp,
+            entry.executionTime,
+            [entry.command, ...entry.args],
+            entry.clientAddress,
+            entry.clientName || ''
+          ])
+          
+          this.sendArray(client, result)
+          break
+        }
+        
+        case 'LEN':
+          this.sendInteger(client, this.slowLog.getLength())
+          break
+        
+        case 'RESET':
+          const clearedCount = this.slowLog.reset()
+          this.sendInteger(client, clearedCount)
+          break
+          
+        default:
+          this.sendError(client, `ERR Unknown SLOWLOG subcommand '${subcommand}'`)
+          break
+      }
+    } catch (error) {
+      this.logger.error('Error handling SLOWLOG command', { subcommand, error })
+      this.sendError(client, 'ERR slowlog operation failed')
+    }
+  }
+
+  /**
+   * Handle CONFIG command - Phase 17
+   */
+  handleConfig(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'config\' command')
+      return
+    }
+
+    const subcommand = args[0].toUpperCase()
+
+    try {
+      switch (subcommand) {
+        case 'SET':
+          this.handleConfigSet(client, args.slice(1))
+          break
+
+        case 'GET':
+          this.handleConfigGet(client, args.slice(1))
+          break
+
+        case 'RESETSTAT':
+          this.handleConfigResetStat(client)
+          break
+
+        default:
+          this.sendError(client, `ERR Unknown CONFIG subcommand '${subcommand}'`)
+          break
+      }
+    } catch (error) {
+      this.logger.error('Error handling CONFIG command', { subcommand, error })
+      this.sendError(client, 'ERR config operation failed')
+    }
+  }
+
+  /**
+   * Handle CONFIG SET subcommand
+   */
+  handleConfigSet(client, args) {
+    if (args.length < 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'config set\' command')
+      return
+    }
+
+    const parameter = args[0].toLowerCase()
+    const value = args[1]
+
+    switch (parameter) {
+      case 'notify-keyspace-events':
+        // Configure keyspace notifications
+        try {
+          const validation = this.keyspaceNotifications.validateConfig(value)
+          if (!validation.valid) {
+            this.sendError(client, `ERR Invalid configuration: ${validation.errors.join(', ')}`)
+            return
+          }
+
+          this.keyspaceNotifications.configure(value)
+          this.sendSimpleString(client, 'OK')
+          
+          this.logger.info('Keyspace notifications configured via CONFIG SET', {
+            value,
+            clientId: client.id
+          })
+        } catch (error) {
+          this.sendError(client, `ERR Failed to configure notifications: ${error.message}`)
+        }
+        break
+
+      default:
+        this.sendError(client, `ERR Unsupported CONFIG parameter '${parameter}'`)
+        break
+    }
+  }
+
+  /**
+   * Handle CONFIG GET subcommand
+   */
+  handleConfigGet(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'config get\' command')
+      return
+    }
+
+    const pattern = args[0].toLowerCase()
+    const results = []
+
+    // Support wildcard matching
+    const matchesPattern = (name) => {
+      if (pattern === '*') return true
+      if (pattern === name) return true
+      // Simple wildcard support
+      const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$')
+      return regex.test(name)
+    }
+
+    // Check each supported configuration parameter
+    if (matchesPattern('notify-keyspace-events')) {
+      results.push('notify-keyspace-events')
+      results.push(this.keyspaceNotifications.getConfig() || '')
+    }
+
+    this.logger.debug('CONFIG GET results', {
+      pattern,
+      results: results.length,
+      values: results,
+      component: 'RedisServer'
+    })
+
+    this.sendArray(client, results)
+  }
+
+  /**
+   * Handle CONFIG RESETSTAT subcommand
+   */
+  handleConfigResetStat(client) {
+    try {
+      // Reset various statistics
+      if (this.serverInfo) {
+        this.serverInfo.resetStats()
+      }
+      if (this.slowLog) {
+        this.slowLog.reset()
+      }
+      if (this.metrics) {
+        this.metrics.reset()
+      }
+      if (this.notificationManager) {
+        // Reset notification statistics but keep subscriptions
+        const stats = this.notificationManager.getStats()
+        this.logger.info('Notification statistics reset', { previousStats: stats })
+      }
+
+      this.sendSimpleString(client, 'OK')
+      this.logger.info('Statistics reset via CONFIG RESETSTAT', { clientId: client.id })
+    } catch (error) {
+      this.logger.error('Error resetting statistics', error)
+      this.sendError(client, 'ERR Failed to reset statistics')
     }
   }
 }
