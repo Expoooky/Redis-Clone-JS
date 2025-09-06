@@ -1,0 +1,53 @@
+# Redis Clone JS - Example Batch Commands
+# This file demonstrates various Redis commands that can be executed in batch mode
+# Usage: node cli/redis-cli.js --batch cli/example-batch.redis
+
+# String operations
+SET greeting "Hello Redis Clone!"
+GET greeting
+SET counter 1
+INCR counter
+INCRBY counter 5
+GET counter
+
+# List operations
+LPUSH tasks "Task 1"
+LPUSH tasks "Task 2"
+LPUSH tasks "Task 3"
+LRANGE tasks 0 -1
+LPOP tasks
+LRANGE tasks 0 -1
+
+# Hash operations
+HSET user:1001 name "John Doe"
+HSET user:1001 email "john@example.com"
+HSET user:1001 age 30
+HGETALL user:1001
+HGET user:1001 name
+
+# Set operations
+SADD fruits apple
+SADD fruits banana
+SADD fruits orange
+SADD fruits apple
+SMEMBERS fruits
+SCARD fruits
+
+# Expiration
+SET temp_key "temporary value"
+EXPIRE temp_key 10
+TTL temp_key
+
+# Key management
+KEYS *
+EXISTS greeting
+TYPE counter
+TYPE tasks
+TYPE user:1001
+TYPE fruits
+
+# Cleanup
+DEL greeting counter tasks user:1001 fruits temp_key
+KEYS *
+
+ECHO "Batch execution completed!"

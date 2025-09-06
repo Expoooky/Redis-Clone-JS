@@ -8,7 +8,7 @@ const path = require('path')
 const { createWriteStream, createReadStream } = require('fs')
 const { createReadline } = require('readline')
 const readline = require('readline')
-const { logger } = require('../utils/Logger')
+const logger = require('../utils/Logger')
 
 /**
  * AOF synchronization policies

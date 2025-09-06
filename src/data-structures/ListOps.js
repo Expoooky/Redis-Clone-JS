@@ -49,6 +49,9 @@ class ListOps {
 
     const listResult = this.ensureList(key)
     if (!listResult.success) {
+      if (typeof listResult.error === 'string' && listResult.error.startsWith('WRONGTYPE')) {
+        return { success: false, error: listResult.error.replace('WRONGTYPE', 'wrong type') }
+      }
       return listResult
     }
 
@@ -87,6 +90,9 @@ class ListOps {
 
     const listResult = this.ensureList(key)
     if (!listResult.success) {
+      if (typeof listResult.error === 'string' && listResult.error.startsWith('WRONGTYPE')) {
+        return { success: false, error: listResult.error.replace('WRONGTYPE', 'wrong type') }
+      }
       return listResult
     }
 

@@ -101,16 +101,16 @@ class DataStore {
 
     // Handle NX (only if not exists) and XX (only if exists) options
     if (options.nx && keyExists) {
-      return { success: false, error: 'Key already exists' }
+      return { success: false, error: 'Key already exists', nxFailed: true }
     }
     if (options.xx && !keyExists) {
-      return { success: false, error: 'Key does not exist' }
+      return { success: false, error: 'Key does not exist', xxFailed: true }
     }
 
     // Check memory usage before setting
     const valueSize = this.calculateSize(value)
     const existingSize = keyExists ? this.calculateSize(db.data.get(key)) : 0
-    const memoryDelta = valueSize - existingSize + (keyExists ? 0 : this.calculateSize(key))
+    const memoryDelta = valueSize - existingSize + (keyExists ? 0 : Buffer.byteLength(key, 'utf8'))
 
     if (this.memoryUsage + memoryDelta > this.maxMemory) {
       logger.warn('Memory limit would be exceeded', {
@@ -198,7 +198,7 @@ class DataStore {
     }
 
     // Calculate memory to free
-    const keySize = this.calculateSize(key)
+    const keySize = Buffer.byteLength(key, 'utf8')
     const valueSize = this.calculateSize(db.data.get(key))
     const memoryFreed = keySize + valueSize
 
@@ -552,7 +552,7 @@ class DataStore {
     if (value === null || value === undefined) return 8
     
     if (typeof value === 'string') {
-      return value.length * 2 // Approximate UTF-16 encoding
+      return Buffer.byteLength(value, 'utf8')
     }
     
     if (typeof value === 'number') {
@@ -564,11 +564,11 @@ class DataStore {
     }
     
     if (Array.isArray(value)) {
-      return value.reduce((size, item) => size + this.calculateSize(item), 24) // Array overhead + items
+      return value.reduce((size, item) => size + this.calculateSize(item), 0)
     }
     
     if (value instanceof Set || value instanceof Map) {
-      let size = 24 // Object overhead
+      let size = 0
       if (value instanceof Set) {
         for (const item of value) {
           size += this.calculateSize(item)
@@ -582,10 +582,14 @@ class DataStore {
     }
     
     if (typeof value === 'object') {
-      return JSON.stringify(value).length * 2 + 24 // Rough estimate
+      try {
+        return Buffer.byteLength(JSON.stringify(value), 'utf8')
+      } catch (_) {
+        return 0
+      }
     }
     
-    return 24 // Default object overhead
+    return 0
   }
 
   /**

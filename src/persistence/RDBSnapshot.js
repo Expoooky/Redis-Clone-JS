@@ -6,7 +6,7 @@
 const fs = require('fs').promises
 const path = require('path')
 const crypto = require('crypto')
-const { logger } = require('../utils/Logger')
+const logger = require('../utils/Logger')
 
 /**
  * RDB file format constants

@@ -1,0 +1,180 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [14.x, 16.x, 18.x]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run linting
+      run: npm run lint
+    
+    - name: Run unit tests
+      run: npm run test:unit
+    
+    - name: Run integration tests
+      run: npm run test:integration
+    
+    - name: Run performance tests
+      run: npm run test:performance
+    
+    - name: Run compatibility tests
+      run: npm run test:compatibility
+    
+    - name: Generate coverage report
+      run: npm run test:coverage
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage/lcov.info
+        flags: unittests
+        name: codecov-umbrella
+    
+    - name: Check coverage threshold
+      run: |
+        COVERAGE=$(npm run test:coverage --silent | grep -o 'Statements.*%' | grep -o '[0-9.]*%' | head -1 | sed 's/%//')
+        echo "Coverage: $COVERAGE%"
+        if (( $(echo "$COVERAGE < 90" | bc -l) )); then
+          echo "❌ Coverage $COVERAGE% is below 90% threshold"
+          exit 1
+        else
+          echo "✅ Coverage $COVERAGE% meets 90% threshold"
+        fi
+
+  security:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Run security audit
+      run: npm audit --audit-level moderate
+    
+    - name: Run dependency check
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+  performance:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js 16
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16.x
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run performance benchmarks
+      run: npm run test:performance
+    
+    - name: Check performance regression
+      run: |
+        echo "Running performance regression checks..."
+        # Add performance regression logic here
+
+  quality:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js 16
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16.x
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run code quality checks
+      run: |
+        npm run lint
+        npm run test:unit
+    
+    - name: SonarCloud Scan
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [test, security, performance, quality]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Use Node.js 16
+      uses: actions/setup-node@v3
+      with:
+        node-version: 16.x
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Build application
+      run: npm run build --if-present
+    
+    - name: Run smoke tests
+      run: |
+        npm start &
+        sleep 5
+        npm run cli -- PING
+        npm run cli -- SET test_key "test_value"
+        npm run cli -- GET test_key
+        pkill -f "node.*server.js"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Add deployment logic here
+    
+    - name: Run integration tests on staging
+      run: |
+        echo "Running integration tests on staging..."
+        # Add staging tests here
+    
+    - name: Deploy to production
+      if: success()
+      run: |
+        echo "Deploying to production environment..."
+        # Add production deployment logic here

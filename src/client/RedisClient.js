@@ -239,7 +239,7 @@ class RedisClient extends EventEmitter {
       }
       
       const response = this.parseResponse();
-      if (response !== null) {
+      if (response !== undefined) {  // Changed: undefined means incomplete, null is a valid response
         // Handle error responses
         if (response && response.error) {
           throw new Error(response.error);
@@ -276,10 +276,10 @@ class RedisClient extends EventEmitter {
    * Parse RESP response
    */
   parseResponse() {
-    if (this.buffer.length === 0) return null;
+    if (this.buffer.length === 0) return undefined;  // Incomplete response
     
     const lineEnd = this.buffer.indexOf('\r\n');
-    if (lineEnd === -1) return null;
+    if (lineEnd === -1) return undefined;  // Incomplete response
     
     const firstLine = this.buffer.substring(0, lineEnd);
     const type = firstLine[0];
@@ -305,7 +305,7 @@ class RedisClient extends EventEmitter {
         }
         
         const totalLength = lineEnd + 2 + length + 2;
-        if (this.buffer.length < totalLength) return null;
+        if (this.buffer.length < totalLength) return undefined;  // Incomplete response
         
         const bulkString = this.buffer.substring(lineEnd + 2, lineEnd + 2 + length);
         this.buffer = this.buffer.substring(totalLength);
@@ -323,10 +323,10 @@ class RedisClient extends EventEmitter {
         
         for (let i = 0; i < arrayLength; i++) {
           const element = this.parseResponse();
-          if (element === null && this.buffer.length === 0) {
+          if (element === undefined) {
             // Incomplete array, put back the array header
             this.buffer = firstLine + '\r\n' + this.buffer;
-            return null;
+            return undefined;
           }
           elements.push(element);
         }
@@ -336,7 +336,7 @@ class RedisClient extends EventEmitter {
       default:
         // Unknown type, skip this character
         this.buffer = this.buffer.substring(1);
-        return null;
+        return undefined;
     }
   }
 

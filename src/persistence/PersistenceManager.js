@@ -5,7 +5,7 @@
 
 const { RDBSnapshot } = require('./RDBSnapshot')
 const { AOFLogger } = require('./AOFLogger')
-const { logger } = require('../utils/Logger')
+const logger = require('../utils/Logger')
 
 class PersistenceManager {
   constructor(dataStore, options = {}) {

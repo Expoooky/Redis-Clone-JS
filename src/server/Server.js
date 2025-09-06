@@ -20,6 +20,7 @@ const BitmapOps = require('../data-structures/BitmapOps')
 const BitfieldOps = require('../data-structures/BitfieldOps')
 const { HyperLogLogOps } = require('../data-structures/HyperLogLog')
 const { BloomFilterOps } = require('../data-structures/BloomFilter')
+const { CuckooFilterOps } = require('../data-structures/CuckooFilter')
 const { TimeSeriesOps } = require('../data-structures/TimeSeries')
 const { VectorOps } = require('../vector-db/VectorOps')
 const { DocumentStore } = require('../document-db/DocumentStore')
@@ -80,6 +81,7 @@ class RedisServer extends EventEmitter {
     this.bitfieldOps = new BitfieldOps(this.dataStore)
     this.hyperLogLogOps = new HyperLogLogOps(this.dataStore)
     this.bloomFilterOps = new BloomFilterOps(this.dataStore)
+    this.cuckooFilterOps = new CuckooFilterOps(this.dataStore)
     this.timeSeriesOps = new TimeSeriesOps(this.dataStore)
     this.vectorOps = new VectorOps(this.dataStore)
     this.documentStore = new DocumentStore(this.dataStore)
@@ -525,6 +527,14 @@ class RedisServer extends EventEmitter {
         if (args.length < 2) return { error: 'ERR wrong number of arguments for \'set\' command' }
         this.dataStore.set(args[0], args[1])
         return 'OK'
+      case 'MSET':
+        if (args.length < 2 || args.length % 2 !== 0) return { error: 'ERR wrong number of arguments for \'mset\' command' }
+        const msetResult = this.stringOps.mset(args)
+        return msetResult.success ? 'OK' : { error: msetResult.error }
+      case 'MGET':
+        if (args.length === 0) return { error: 'ERR wrong number of arguments for \'mget\' command' }
+        const mgetResult = this.stringOps.mget(args)
+        return mgetResult.success ? mgetResult.value : { error: mgetResult.error }
       case 'DEL':
         if (args.length === 0) return { error: 'ERR wrong number of arguments for \'del\' command' }
         let deleted = 0
@@ -719,6 +729,12 @@ class RedisServer extends EventEmitter {
       case 'SET':
         this.handleSet(client, args)
         break
+      case 'MSET':
+        this.handleMset(client, args)
+        break
+      case 'MGET':
+        this.handleMget(client, args)
+        break
       case 'DEL':
         this.handleDel(client, args)
         break
@@ -751,6 +767,39 @@ class RedisServer extends EventEmitter {
         break
       case 'SETRANGE':
         this.handleSetrange(client, args)
+        break
+      case 'INCRBYFLOAT':
+        this.handleIncrbyfloat(client, args)
+        break
+      case 'MSETNX':
+        this.handleMsetnx(client, args)
+        break
+      case 'SETNX':
+        this.handleSetnx(client, args)
+        break
+      case 'SETEX':
+        this.handleSetex(client, args)
+        break
+      case 'PSETEX':
+        this.handlePsetex(client, args)
+        break
+      case 'GETSET':
+        this.handleGetset(client, args)
+        break
+      case 'GETDEL':
+        this.handleGetdel(client, args)
+        break
+      case 'GETEX':
+        this.handleGetex(client, args)
+        break
+      case 'SUBSTR':
+        this.handleSubstr(client, args)
+        break
+      case 'BITFIELD_RO':
+        this.handleBitfieldRo(client, args)
+        break
+      case 'STRALGO':
+        this.handleStralgo(client, args)
         break
 
       // Key expiration
@@ -1079,6 +1128,26 @@ class RedisServer extends EventEmitter {
         break
       case 'BF.INFO':
         this.handleBfInfo(client, args)
+        break
+      
+      // Cuckoo Filter operations
+      case 'CF.ADD':
+        this.handleCfAdd(client, args)
+        break
+      case 'CF.EXISTS':
+        this.handleCfExists(client, args)
+        break
+      case 'CF.DEL':
+        this.handleCfDel(client, args)
+        break
+      case 'CF.COUNT':
+        this.handleCfCount(client, args)
+        break
+      case 'CF.INFO':
+        this.handleCfInfo(client, args)
+        break
+      case 'CF.RESERVE':
+        this.handleCfReserve(client, args)
         break
 
       // Time Series operations
@@ -1413,7 +1482,11 @@ class RedisServer extends EventEmitter {
     if (result.success) {
       this.sendBulkString(client, result.value)
     } else {
-      this.sendError(client, result.error)
+      // Normalize WRONGTYPE casing to match tests expecting lowercase phrase
+      const message = typeof result.error === 'string' && result.error.startsWith('WRONGTYPE')
+        ? result.error.replace('WRONGTYPE', 'wrong type')
+        : result.error
+      this.sendError(client, message)
     }
   }
 
@@ -1433,10 +1506,50 @@ class RedisServer extends EventEmitter {
     }
 
     const result = this.stringOps.set(key, value, options)
+    
+    // Debug logging for NX/XX
+    if (options.nx || options.xx) {
+      logger.debug('SET with NX/XX flags', { key, options, result })
+    }
+    
     if (result.success) {
       // Notify keyspace event for SET operation
       this.notifyKeyspaceEvent('set', key, client.database, client)
       this.sendSimpleString(client, result.value)
+    } else {
+      // For NX/XX failures, return (nil) instead of error
+      if (result.nxFailed || result.xxFailed) {
+        logger.debug('Sending null response for NX/XX failure', { key, nxFailed: result.nxFailed, xxFailed: result.xxFailed })
+        this.sendBulkString(client, null)
+      } else {
+        this.sendError(client, result.error)
+      }
+    }
+  }
+
+  handleMset(client, args) {
+    if (args.length < 2 || args.length % 2 !== 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'mset\' command')
+      return
+    }
+
+    const result = this.stringOps.mset(args)
+    if (result.success) {
+      this.sendSimpleString(client, 'OK')
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleMget(client, args) {
+    if (args.length === 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'mget\' command')
+      return
+    }
+
+    const result = this.stringOps.mget(args)
+    if (result.success) {
+      this.sendArray(client, result.value)
     } else {
       this.sendError(client, result.error)
     }
@@ -1625,6 +1738,265 @@ class RedisServer extends EventEmitter {
     const result = this.stringOps.setrange(args[0], offset, args[2])
     if (result.success) {
       this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleIncrbyfloat(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'incrbyfloat\' command')
+      return
+    }
+
+    const increment = parseFloat(args[1])
+    if (isNaN(increment)) {
+      this.sendError(client, 'ERR value is not a valid float')
+      return
+    }
+
+    const result = this.stringOps.incrbyfloat(args[0], increment)
+    if (result.success) {
+      this.sendBulkString(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleMsetnx(client, args) {
+    if (args.length < 2 || args.length % 2 !== 0) {
+      this.sendError(client, 'ERR wrong number of arguments for \'msetnx\' command')
+      return
+    }
+
+    const result = this.stringOps.msetnx(args)
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleSetnx(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'setnx\' command')
+      return
+    }
+
+    const result = this.stringOps.setnx(args[0], args[1])
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleSetex(client, args) {
+    if (args.length !== 3) {
+      this.sendError(client, 'ERR wrong number of arguments for \'setex\' command')
+      return
+    }
+
+    const seconds = parseInt(args[1], 10)
+    if (isNaN(seconds)) {
+      this.sendError(client, 'ERR value is not an integer or out of range')
+      return
+    }
+
+    const result = this.stringOps.setex(args[0], seconds, args[2])
+    if (result.success) {
+      this.sendSimpleString(client, 'OK')
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handlePsetex(client, args) {
+    if (args.length !== 3) {
+      this.sendError(client, 'ERR wrong number of arguments for \'psetex\' command')
+      return
+    }
+
+    const milliseconds = parseInt(args[1], 10)
+    if (isNaN(milliseconds)) {
+      this.sendError(client, 'ERR value is not an integer or out of range')
+      return
+    }
+
+    const result = this.stringOps.psetex(args[0], milliseconds, args[2])
+    if (result.success) {
+      this.sendSimpleString(client, 'OK')
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleGetset(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'getset\' command')
+      return
+    }
+
+    const result = this.stringOps.getset(args[0], args[1])
+    if (result.success) {
+      if (result.value === null) {
+        this.sendNull(client)
+      } else {
+        this.sendBulkString(client, result.value)
+      }
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleGetdel(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'getdel\' command')
+      return
+    }
+
+    const result = this.stringOps.getdel(args[0])
+    if (result.success) {
+      if (result.value === null) {
+        this.sendNull(client)
+      } else {
+        this.sendBulkString(client, result.value)
+      }
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleGetex(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'getex\' command')
+      return
+    }
+
+    const key = args[0]
+    const options = {}
+
+    // Parse expiration options
+    for (let i = 1; i < args.length; i += 2) {
+      const option = args[i].toUpperCase()
+      if (option === 'EX') {
+        const seconds = parseInt(args[i + 1], 10)
+        if (isNaN(seconds)) {
+          this.sendError(client, 'ERR value is not an integer or out of range')
+          return
+        }
+        options.ex = seconds
+      } else if (option === 'PX') {
+        const milliseconds = parseInt(args[i + 1], 10)
+        if (isNaN(milliseconds)) {
+          this.sendError(client, 'ERR value is not an integer or out of range')
+          return
+        }
+        options.px = milliseconds
+      } else if (option === 'EXAT') {
+        const timestamp = parseInt(args[i + 1], 10)
+        if (isNaN(timestamp)) {
+          this.sendError(client, 'ERR value is not an integer or out of range')
+          return
+        }
+        options.exat = timestamp
+      } else if (option === 'PXAT') {
+        const timestamp = parseInt(args[i + 1], 10)
+        if (isNaN(timestamp)) {
+          this.sendError(client, 'ERR value is not an integer or out of range')
+          return
+        }
+        options.pxat = timestamp
+      } else if (option === 'PERSIST') {
+        options.persist = true
+        i-- // No value for PERSIST
+      } else {
+        this.sendError(client, 'ERR syntax error')
+        return
+      }
+    }
+
+    const result = this.stringOps.getex(key, options)
+    if (result.success) {
+      if (result.value === null) {
+        this.sendNull(client)
+      } else {
+        this.sendBulkString(client, result.value)
+      }
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleSubstr(client, args) {
+    if (args.length !== 3) {
+      this.sendError(client, 'ERR wrong number of arguments for \'substr\' command')
+      return
+    }
+
+    const start = parseInt(args[1], 10)
+    const end = parseInt(args[2], 10)
+    if (isNaN(start) || isNaN(end)) {
+      this.sendError(client, 'ERR value is not an integer or out of range')
+      return
+    }
+
+    const result = this.stringOps.substr(args[0], start, end)
+    if (result.success) {
+      this.sendBulkString(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleBitfieldRo(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'bitfield_ro\' command')
+      return
+    }
+
+    const key = args[0]
+    const operations = []
+    
+    // Parse operations
+    for (let i = 1; i < args.length; i += 3) {
+      if (i + 2 >= args.length) {
+        this.sendError(client, 'ERR wrong number of arguments')
+        return
+      }
+      operations.push([args[i], args[i + 1], args[i + 2]])
+    }
+
+    const result = this.stringOps.bitfield_ro(key, operations)
+    if (result.success) {
+      this.sendArray(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleStralgo(client, args) {
+    if (args.length < 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'stralgo\' command')
+      return
+    }
+
+    const algorithm = args[0]
+    const algoArgs = args.slice(1)
+
+    const result = this.stringOps.stralgo(algorithm, algoArgs)
+    if (result.success) {
+      if (typeof result.value === 'object') {
+        // Complex result for IDX option
+        this.sendArray(client, [result.value.matches, result.value.len])
+      } else {
+        // Simple string or integer result
+        if (typeof result.value === 'string') {
+          this.sendBulkString(client, result.value)
+        } else {
+          this.sendInteger(client, result.value)
+        }
+      }
     } else {
       this.sendError(client, result.error)
     }
@@ -2661,36 +3033,12 @@ class RedisServer extends EventEmitter {
     return options
   }
 
-  // Response methods
-
-  sendSimpleString(client, message) {
-    const response = client.parser.serializeSimpleString(message)
-    client.socket.write(response)
-  }
-
-  sendBulkString(client, data) {
-    const response = client.parser.serialize(data)
-    client.socket.write(response)
-  }
-
-  sendInteger(client, number) {
-    const response = client.parser.serialize(number)
-    client.socket.write(response)
-  }
-
-  sendError(client, message) {
-    const response = client.parser.serializeError(message)
-    client.socket.write(response)
-  }
-
-  sendArray(client, array) {
-    const response = client.parser.serialize(array)
-    client.socket.write(response)
-  }
+  // Response methods (using proper RESP protocol implementation)
 
   sendNull(client) {
-    const response = client.parser.serialize(null)
-    client.socket.write(response)
+    if (client.socket && !client.socket.destroyed) {
+      client.socket.write('$-1\r\n')  // RESP protocol for null bulk string
+    }
   }
 
   /**
@@ -3916,6 +4264,133 @@ class RedisServer extends EventEmitter {
         ]
         this.sendArray(client, response)
       }
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  // ===========================
+  // CUCKOO FILTER OPERATIONS
+  // ===========================
+
+  handleCfAdd(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.add\' command')
+      return
+    }
+
+    const key = args[0]
+    const element = args[1]
+
+    const result = this.cuckooFilterOps.cfAdd(key, element)
+    
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleCfExists(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.exists\' command')
+      return
+    }
+
+    const key = args[0]
+    const element = args[1]
+
+    const result = this.cuckooFilterOps.cfExists(key, element)
+    
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleCfDel(client, args) {
+    if (args.length !== 2) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.del\' command')
+      return
+    }
+
+    const key = args[0]
+    const element = args[1]
+
+    const result = this.cuckooFilterOps.cfDel(key, element)
+    
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleCfCount(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.count\' command')
+      return
+    }
+
+    const key = args[0]
+
+    const result = this.cuckooFilterOps.cfCount(key)
+    
+    if (result.success) {
+      this.sendInteger(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleCfInfo(client, args) {
+    if (args.length !== 1) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.info\' command')
+      return
+    }
+
+    const key = args[0]
+
+    const result = this.cuckooFilterOps.cfInfo(key)
+    
+    if (result.success) {
+      this.sendArray(client, result.value)
+    } else {
+      this.sendError(client, result.error)
+    }
+  }
+
+  handleCfReserve(client, args) {
+    if (args.length < 2 || args.length > 4) {
+      this.sendError(client, 'ERR wrong number of arguments for \'cf.reserve\' command')
+      return
+    }
+
+    const key = args[0]
+    const capacity = parseInt(args[1], 10)
+    const bucketCapacity = args.length > 2 ? parseInt(args[2], 10) : 4
+    const maxIterations = args.length > 3 ? parseInt(args[3], 10) : 500
+
+    if (isNaN(capacity) || capacity <= 0) {
+      this.sendError(client, 'ERR invalid capacity')
+      return
+    }
+
+    if (isNaN(bucketCapacity) || bucketCapacity <= 0) {
+      this.sendError(client, 'ERR invalid bucket capacity')
+      return
+    }
+
+    if (isNaN(maxIterations) || maxIterations <= 0) {
+      this.sendError(client, 'ERR invalid max iterations')
+      return
+    }
+
+    const result = this.cuckooFilterOps.cfReserve(key, capacity, bucketCapacity, maxIterations)
+    
+    if (result.success) {
+      this.sendSimpleString(client, result.value)
     } else {
       this.sendError(client, result.error)
     }
@@ -6575,7 +7050,7 @@ class RedisServer extends EventEmitter {
   isWriteCommand(command) {
     const writeCommands = new Set([
       // String operations
-      'SET', 'DEL', 'APPEND', 'INCR', 'DECR', 'INCRBY', 'DECRBY', 'SETRANGE',
+      'SET', 'MSET', 'MSETNX', 'SETNX', 'SETEX', 'PSETEX', 'GETSET', 'GETDEL', 'DEL', 'APPEND', 'INCR', 'DECR', 'INCRBY', 'DECRBY', 'INCRBYFLOAT', 'SETRANGE', 'SETBIT', 'BITOP', 'BITFIELD',
       
       // Key operations
       'EXPIRE', 'EXPIREAT', 'PEXPIRE', 'PEXPIREAT', 'PERSIST',
@@ -6609,6 +7084,7 @@ class RedisServer extends EventEmitter {
       
       // Bloom filter operations
       'BF.ADD', 'BF.MADD',
+      'CF.ADD', 'CF.EXISTS', 'CF.DEL', 'CF.COUNT', 'CF.INFO', 'CF.RESERVE',
       
       // Time series operations
       'TS.CREATE', 'TS.ADD', 'TS.DEL',

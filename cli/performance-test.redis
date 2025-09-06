@@ -1,0 +1,51 @@
+# Redis Clone JS - Performance Test Batch
+# Usage: node cli/redis-cli.js --batch cli/performance-test.redis --verbose
+
+ECHO "Starting performance test..."
+
+# Bulk SET operations
+SET perf:1 "value1"
+SET perf:2 "value2"
+SET perf:3 "value3"
+SET perf:4 "value4"
+SET perf:5 "value5"
+SET perf:6 "value6"
+SET perf:7 "value7"
+SET perf:8 "value8"
+SET perf:9 "value9"
+SET perf:10 "value10"
+
+# Bulk GET operations
+GET perf:1
+GET perf:2
+GET perf:3
+GET perf:4
+GET perf:5
+GET perf:6
+GET perf:7
+GET perf:8
+GET perf:9
+GET perf:10
+
+# List operations performance
+LPUSH perf:list "item1"
+LPUSH perf:list "item2"
+LPUSH perf:list "item3"
+LPUSH perf:list "item4"
+LPUSH perf:list "item5"
+LRANGE perf:list 0 -1
+
+# Hash operations performance
+HSET perf:hash field1 "value1"
+HSET perf:hash field2 "value2"
+HSET perf:hash field3 "value3"
+HSET perf:hash field4 "value4"
+HSET perf:hash field5 "value5"
+HGETALL perf:hash
+
+ECHO "Performance test completed!"
+
+# Cleanup
+KEYS perf:*
+FLUSHDB
+ECHO "Cleanup completed!"

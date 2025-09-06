@@ -13,7 +13,7 @@ logger.setLevel('debug')
 console.log('🚀 Starting Redis-Clone-JS Server...')
 
 // Get configuration from environment
-const port = parseInt(process.env.REDIS_PORT, 10) || 6379
+const port = parseInt(process.env.PORT || process.env.REDIS_PORT, 10) || 6379
 const host = process.env.REDIS_HOST || '127.0.0.1'
 const role = process.env.REDIS_ROLE || 'master'
 const masterHost = process.env.REDIS_MASTER_HOST

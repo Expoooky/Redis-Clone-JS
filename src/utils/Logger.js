@@ -46,13 +46,16 @@ class Logger {
     )
 
     // Create transports array
-    const transports = [
-      // Console transport (always enabled in development)
-      new winston.transports.Console({
-        format: consoleFormat,
-        level: process.env.LOG_LEVEL || 'info'
-      })
-    ]
+    const transports = []
+    // Enable console transport unless explicitly disabled
+    if (process.env.LOG_CONSOLE !== 'false') {
+      transports.push(
+        new winston.transports.Console({
+          format: consoleFormat,
+          level: process.env.LOG_LEVEL || 'info'
+        })
+      )
+    }
 
     // Add file transports if not in test environment
     if (process.env.NODE_ENV !== 'test') {

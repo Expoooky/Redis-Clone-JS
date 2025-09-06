@@ -1,3 +1,12 @@
+node_modules/
+coverage/
+logs/
+data/*.rdb
+*.log
+.DS_Store
+dist/
+tmp/
+*.tmp
 # Dependencies
 node_modules/
 npm-debug.log*
