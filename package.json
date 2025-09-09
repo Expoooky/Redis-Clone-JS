@@ -1,99 +1,16 @@
 {
-  "name": "redis-clone-js",
+  "name": "redis-like-project",
   "version": "1.0.0",
-  "description": "A Redis-like in-memory data store implementation in JavaScript",
-  "main": "simple-server.js",
-  "bin": {
-    "redis-cli": "./cli/redis-cli.js"
-  },
+  "main": "src/server/server.js",
   "scripts": {
-    "start": "node simple-server.js",
-    "dev": "node simple-server.js --dev",
-    "test": "jest --runInBand",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
-    "test:unit": "jest tests/unit",
-    "test:integration": "jest tests/integration",
-    "test:performance": "jest tests/performance",
-    "test:compatibility": "jest tests/compatibility",
-    "test:stress": "jest tests/stress",
-    "test:all": "jest --coverage --verbose",
-    "test:ci": "jest --coverage --ci --watchAll=false --runInBand",
-    "benchmark": "node benchmarks/redis-comparison.js",
-    "clean": "rimraf logs coverage data/*.rdb"
-    "cli": "node cli/redis-cli.js",
-    "cli:interactive": "node cli/redis-cli.js",
-    "cli:help": "node cli/redis-cli.js --help",
-    "lint": "eslint src/ tests/ cli/",
-    "lint:fix": "eslint src/ tests/ cli/ --fix"
+    "start": "node src/server/server.js",
+    "cli": "node src/client/client-cli.js",
+    "dev": "node src/server/server.js",
+    "test": "node --test",
+    "test:all": "node scripts/run-tests.js"
   },
-  "keywords": [
-    "redis",
-    "in-memory",
-    "database",
-    "key-value",
-    "data-store",
-    "cache",
-    "nosql"
-  ],
-  "devDependencies": {
-    "benchmark": "^2.1.4",
-    "eslint": "^8.30.0",
-    "eslint-config-standard": "^17.0.0",
-    "eslint-plugin-import": "^2.26.0",
-    "eslint-plugin-node": "^11.1.0",
-    "eslint-plugin-promise": "^6.1.1",
-    "jest": "^29.3.1"
-  },
-  "engines": {
-    "node": ">=14.0.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Expoooky/redis-clone-js.git"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "collectCoverageFrom": [
-      "src/**/*.js",
-      "cli/**/*.js",
-      "!src/**/*.test.js",
-      "!cli/**/*.test.js",
-      "!**/node_modules/**",
-      "!coverage/**"
-    ],
-    "coverageDirectory": "coverage",
-    "coverageReporters": [
-      "text",
-      "text-summary",
-      "lcov",
-      "html",
-      "json"
-    ],
-    "testMatch": [
-      "**/tests/**/*.test.js"
-    ],
-    "setupFilesAfterEnv": [
-      "<rootDir>/tests/setup.js"
-    ],
-    "testTimeout": 30000,
-    "verbose": true,
-    "coverageThreshold": {
-      "global": {
-        "branches": 90,
-        "functions": 90,
-        "lines": 90,
-        "statements": 90
-      }
-    },
-    "testPathIgnorePatterns": [
-      "/node_modules/",
-      "/coverage/",
-      "/data/",
-      "/logs/"
-    ]
-  },
-  "dependencies": {
-    "winston": "^3.13.0"
-  }
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
 }
