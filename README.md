@@ -121,7 +121,3 @@ src/
   client/      # CLI and tiny SDK
 test/          # Unit & integration tests
 ```
-
-License
-
-MIT (see LICENSE if present).
